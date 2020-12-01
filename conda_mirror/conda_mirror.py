@@ -26,7 +26,7 @@ logger = None
 
 DEFAULT_BAD_LICENSES = ["agpl", ""]
 
-DEFAULT_PLATFORMS = ["linux-64", "linux-32", "osx-64", "win-64", "win-32"]
+DEFAULT_PLATFORMS = ["linux-64", "linux-32", "linux-s390x", "osx-64", "win-64", "win-32"]
 
 DEFAULT_CHUNK_SIZE = 16 * 1024
 
@@ -181,7 +181,7 @@ def _make_arg_parser():
         "--platform",
         help=(
             "The OS platform(s) to mirror. one of: {'linux-64', 'linux-32',"
-            "'osx-64', 'win-32', 'win-64'}"
+            "'linux-s390x', 'osx-64', 'win-32', 'win-64'}"
         ),
     )
     ap.add_argument(
@@ -487,7 +487,7 @@ def get_repodata(channel, platform, proxies=None, ssl_verify=None):
     ----------
     channel : str
         anaconda.org/CHANNEL
-    platform : {'linux-64', 'linux-32', 'osx-64', 'win-32', 'win-64'}
+    platform : {'linux-64', 'linux-32', 'linux-s390x', 'osx-64', 'win-32', 'win-64'}
         The platform of interest
     proxies : dict
         Proxys for connecting internet
@@ -810,7 +810,7 @@ def main(
         apply checks
     platform : str
         The platform that you wish to mirror for. Common options are
-        'linux-64', 'osx-64', 'win-64' and 'win-32'. Any platform is valid as
+        'linux-64', 'linux-s390x', 'osx-64', 'win-64' and 'win-32'. Any platform is valid as
         long as the url resolves.
     blacklist : iterable of tuples, optional
         The values of blacklist should be (key, glob) where key is one of the
