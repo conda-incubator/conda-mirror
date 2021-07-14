@@ -22,6 +22,7 @@ setup(
     platforms=["Linux", "Mac OSX", "Windows"],
     license="BSD 3-Clause",
     install_requires=["requests", "pyyaml", "tqdm"],
+    python_requires=">=3.6",
     entry_points={
         "console_scripts": [
             "conda-mirror = conda_mirror.conda_mirror:cli",

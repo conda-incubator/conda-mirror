@@ -1,0 +1,40 @@
+# This recipe can be used to directly build a conda package for this project.
+# There is already a conda-forge feedstock for this project that pulls from pypi,
+# so this recipe is only needed if you want to build and deply a copy of this
+# package in your own channel.
+
+{% set data = load_setup_py_data() %} # copy parameters from setup.py
+
+package:
+  name: conda-mirror
+  version: {{ data['version'] }}
+
+source:
+  path: ..
+
+build:
+  script: python setup.py install --single-version-externally-managed --record=record.txt
+
+  noarch: python
+
+requirements:
+  build:
+    - python {{ data['python_requires'] }}
+    - setuptools
+
+  run:
+    - python {{ data['python_requires'] }}
+
+    {% for dep in data['install_requires'] %}
+    - {{ dep.lower() }}
+    {% endfor %}
+
+test:
+  commands:
+    - conda-mirror -h
+
+about:
+  home: {{ data['url'] }}
+  license: {{ data['license'] }}
+  description: {{ data['description'] }}
+  summary: {{ data['description'] }}
