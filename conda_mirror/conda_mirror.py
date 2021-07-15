@@ -31,7 +31,7 @@ logger = None
 
 DEFAULT_BAD_LICENSES = ["agpl", ""]
 
-DEFAULT_PLATFORMS = ["linux-64", "linux-32", "osx-64", "win-64", "win-32"]
+DEFAULT_PLATFORMS = ["linux-64", "linux-32", "osx-64", "win-64", "win-32", "noarch"]
 
 DEFAULT_CHUNK_SIZE = 16 * 1024
 
@@ -251,7 +251,11 @@ def _make_arg_parser():
     argument_parser : argparse.ArgumentParser
         The instantiated argument parser for this CLI
     """
-    ap = argparse.ArgumentParser(description="CLI interface for conda-mirror.py")
+    ap = argparse.ArgumentParser(
+        description="""
+        Makes a partial copy of a conda channel in a local directory.
+        """
+    )
 
     ap.add_argument(
         "--upstream-channel",
@@ -277,10 +281,7 @@ def _make_arg_parser():
     )
     ap.add_argument(
         "--platform",
-        help=(
-            "The OS platform(s) to mirror. one of: {'linux-64', 'linux-32',"
-            "'osx-64', 'win-32', 'win-64'}"
-        ),
+        help=(f"The OS platform(s) to mirror. one of: {', '.join(DEFAULT_PLATFORMS)}"),
     )
     ap.add_argument(
         "-D",
@@ -390,12 +391,12 @@ def _make_arg_parser():
     return ap
 
 
-def _init_logger(verbosity):
+def _init_logger(verbosity: int) -> None:
     # set up the logger
     global logger
     logger = logging.getLogger("conda_mirror")
     logmap = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
-    loglevel = logmap.get(verbosity, "3")
+    loglevel = logmap.get(min(int(verbosity), 3))
 
     # clear all handlers
     for handler in logger.handlers:
@@ -409,9 +410,8 @@ def _init_logger(verbosity):
 
     logger.addHandler(stream_handler)
 
-    print(
-        "Log level set to %s" % logging.getLevelName(logmap[verbosity]), file=sys.stdout
-    )
+    if verbosity > 0:
+        print("Log level set to %s" % logging.getLevelName(loglevel))
 
 
 def _parse_and_format_args():
@@ -423,14 +423,18 @@ def _parse_and_format_args():
     # parse arguments without setting defaults
     given_args, _ = parser._parse_known_args(sys.argv[1:], argparse.Namespace())
 
-    _init_logger(args.verbose)
-    logger.debug("sys.argv: %s", sys.argv)
-
     if args.version:
         from . import __version__
 
         print(__version__)
         sys.exit(1)
+
+    verbosity = int(args.verbose)
+    if args.dry_run:
+        verbosity = max(verbosity, 2)
+
+    _init_logger(verbosity)
+    logger.debug("sys.argv: %s", sys.argv)
 
     config_dict = {}
     if args.config:
@@ -759,8 +763,11 @@ def _list_conda_packages(local_dir):
     list
         List of conda packages in `local_dir`
     """
-    contents = os.listdir(local_dir)
-    return fnmatch.filter(contents, "*.tar.bz2")
+    results = []
+    if os.path.isdir(local_dir):
+        contents = os.listdir(local_dir)
+        results.extend(fnmatch.filter(contents, "*.tar.bz2"))
+    return results
 
 
 def _validate_packages(package_repodata, package_directory, num_threads=1):
@@ -916,7 +923,7 @@ def main(
         apply checks
     platform : str
         The platform that you wish to mirror for. Common options are
-        'linux-64', 'osx-64', 'win-64' and 'win-32'. Any platform is valid as
+        'linux-64', 'osx-64', 'win-64', 'win-32' and 'noarch'. Any platform is valid as
         long as the url resolves.
     blacklist : iterable of tuples, optional
         The values of blacklist should be (key, glob) where key is one of the
@@ -1010,13 +1017,13 @@ def main(
         "to-mirror": set(),
     }
     # Implementation:
-    if not os.path.exists(os.path.join(target_directory, platform)):
-        os.makedirs(os.path.join(target_directory, platform))
+    local_directory = os.path.join(target_directory, platform)
+    if not dry_run:
+        os.makedirs(local_directory, exist_ok=True)
 
     info, packages = get_repodata(
         upstream_channel, platform, proxies=proxies, ssl_verify=ssl_verify
     )
-    local_directory = os.path.join(target_directory, platform)
 
     # 1. validate local repo
     # validating all packages is taking many hours.
@@ -1051,8 +1058,8 @@ def main(
     # make final mirror list of not-blacklist + whitelist
     summary["blacklisted"].update(excluded_packages)
 
-    logger.info("BLACKLISTED PACKAGES")
-    logger.info(pformat(sorted(excluded_packages)))
+    logger.debug("EXCLUDED PACKAGES")  # this can be very long, so log at debug level
+    logger.debug(pformat(sorted(excluded_packages)))
 
     # Get a list of all packages in the local mirror
     if dry_run:
