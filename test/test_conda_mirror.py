@@ -51,7 +51,7 @@ def test_restore_required_dependencies(repodata):
     _, all_packages = repodata["conda-forge"]
     excluded = set(all_packages)
 
-    excluded2 = restore(all_packages, excluded, set())
+    excluded2 = restore(all_packages, excluded, set(), set())
     assert excluded2 == excluded
 
     conda_packages = _match(all_packages, dict(name="conda", version=">=4.10"))
@@ -59,13 +59,17 @@ def test_restore_required_dependencies(repodata):
         assert p.get("name") == "conda"
 
     required = set(list(conda_packages)[:1])  # just take the first match
-    excluded2 = restore(all_packages, excluded - required, required)
+    excluded2 = restore(
+        all_packages, excluded - required, required, {"conda", "python", "python_abi"}
+    )
     reincluded = excluded - excluded2
     reincluded_names = set(all_packages.get(r).get("name") for r in reincluded)
 
     assert len(excluded) > len(reincluded) > 0
     assert "yaml" in reincluded_names
     assert "requests" in reincluded_names
+    assert "python" not in reincluded_names
+    assert "python_abi" not in reincluded_names
 
 
 def test_version():

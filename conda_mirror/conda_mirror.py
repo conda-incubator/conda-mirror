@@ -173,6 +173,7 @@ def _restore_required_dependencies(
     all_packages: Dict[str, Dict[str, Any]],
     excluded: Set[str],
     required: Set[str],
+    processed_names: Set[str],
 ) -> Set[str]:
     """Recursively removes dependencies of required packages from excluded packages.
 
@@ -189,6 +190,9 @@ def _restore_required_dependencies(
         Initial set of package filenames to be excluded from download.
     required:
         Set of package filenames initially to be included.
+    processed_names:
+        Set of package names that have already been processed and
+        that should not be considered in any dependencies.
 
     Returns
     -------
@@ -198,8 +202,6 @@ def _restore_required_dependencies(
     cur_required = set(required)
 
     # TODO - support platform-specific + noarch
-
-    already_required = set(all_packages.get(r, {}).get("name") for r in required)
 
     final_excluded: Set[str] = set(excluded)
 
@@ -214,7 +216,7 @@ def _restore_required_dependencies(
                     pkg_name, version_spec = dep.split(maxsplit=1)
                 except ValueError:
                     pkg_name, version_spec = dep, ""
-                if pkg_name not in already_required:
+                if pkg_name not in processed_names:
                     required_depend_specs.setdefault(pkg_name, set()).add(version_spec)
 
         cur_required.clear()
@@ -286,7 +288,12 @@ def _make_arg_parser():
         "-D",
         "--include-depends",
         action="store_true",
-        help=("Include packages matching any dependencies of packages in whitelist."),
+        help="""
+        Include direct and indirect dependencies of packages in whitelist.
+        This will not include new packages that are explicitly named in the whitelist.
+        For example, if the whitelist requires python 2.7 and it is not found in the channel,
+        then no other version of python will be pulled in through the dependencies.
+        """,
     )
     ap.add_argument(
         "-v",
@@ -1037,15 +1044,19 @@ def main(
 
     # 3. un-blacklist packages that are actually whitelisted
     # match whitelist on blacklist
+    included_package_names: Set[str] = set()
     if whitelist:
         for wlist in whitelist:
+            name = wlist.get("name")
+            if name and "*" not in name:
+                included_package_names.add(name)
             matched_packages = list(_match(packages, wlist))
             required_packages.update(matched_packages)
         excluded_packages.difference_update(required_packages)
 
     if include_depends:
         excluded_packages = _restore_required_dependencies(
-            packages, excluded_packages, required_packages
+            packages, excluded_packages, required_packages, included_package_names
         )
 
     # make final mirror list of not-blacklist + whitelist
