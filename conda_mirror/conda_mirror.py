@@ -613,6 +613,7 @@ def get_repodata(channel, platform, proxies=None, ssl_verify=None):
     resp = requests.get(url, proxies=proxies, verify=ssl_verify).json()
     info = resp.get("info", {})
     packages = resp.get("packages", {})
+    packages.update(resp.get("packages.conda", {}))
     # Patch the repodata.json so that all package info dicts contain a "subdir"
     # key.  Apparently some channels on anaconda.org do not contain the
     # 'subdir' field. I think this this might be relegated to the
@@ -747,7 +748,7 @@ def _download_backoff_retry(
 
 
 def _list_conda_packages(local_dir):
-    """List the conda packages (*.tar.bz2 files) in `local_dir`
+    """List the conda packages (tar.bz2 or conda files) in `local_dir`
 
     Parameters
     ----------
@@ -760,7 +761,7 @@ def _list_conda_packages(local_dir):
         List of conda packages in `local_dir`
     """
     contents = os.listdir(local_dir)
-    return fnmatch.filter(contents, "*.tar.bz2")
+    return [fn for fn in contents if fn.endswith(".tar.bz2") or fn.endswith(".conda")]
 
 
 def _validate_packages(package_repodata, package_directory, num_threads=1):
