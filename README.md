@@ -126,7 +126,7 @@ source: conda-forge
 destination: ./my-channel
 
 include:
-  - name: jupyter-ai
+  - jupyter-ai
 exclude:
   - name-glob: jupyter*
 ```
