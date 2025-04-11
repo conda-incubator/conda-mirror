@@ -79,9 +79,7 @@ jobs:
   release:
     name: Create Release
     needs: [metadata, build]
-    # if: needs.metadata.outputs.release == 'true'
-    # TODO: enable once creating release
-    if: false
+    if: needs.metadata.outputs.release == 'true'
     permissions:
       contents: write
     runs-on: ubuntu-latest
