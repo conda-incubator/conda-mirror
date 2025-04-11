@@ -105,9 +105,8 @@ destination: ./my-channel
 exclude:
   # you can use MatchSpecs here
   - jupyter >=0.5.0
-  # you can also glob over names
-  - name-glob: "*"
-    matchspec: "[license=AGPL-3.0-or-later]"
+  # you can also specify licenses in the MatchSpecs
+  - "*[license=AGPL-3.0-or-later]"
 ```
 
 Only mirror whitelisted packages:

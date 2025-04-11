@@ -161,6 +161,7 @@ impl<'de> Deserialize<'de> for MatchSpecWrapper {
 pub enum PackageConfig {
     #[serde(rename_all = "kebab-case")]
     PackageGlob {
+        // TODO: use regular glob once https://github.com/conda/rattler/issues/1239 is done
         name_glob: GlobPattern,
         matchspec: Option<NamelessMatchSpecWrapper>,
     },
