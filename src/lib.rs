@@ -7,8 +7,7 @@ use rattler_conda_types::{
 };
 use rattler_digest::{compute_bytes_digest, Sha256Hash};
 use rattler_networking::{
-    retry_policies::ExponentialBackoff, s3_middleware::S3Config, Authentication,
-    AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
+    authentication_storage::{backends::memory::MemoryStorage, StorageBackend}, retry_policies::ExponentialBackoff, s3_middleware::S3Config, Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware
 };
 use reqwest_middleware::{reqwest::Client, ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::RetryTransientMiddleware;
@@ -632,9 +631,32 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
         }
     }
 
-    client_builder = client_builder.with_arc(Arc::new(
-        AuthenticationMiddleware::from_env_and_defaults().into_diagnostic()?,
-    ));
+    let auth_store = if let Some(s3_credentials) = config.s3_credentials_source.clone() {
+        let mut auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
+        let memory_storage = MemoryStorage::default();
+        let s3_host = match config.source.clone() {
+            NamedChannelOrUrl::Path(_) | NamedChannelOrUrl::Name(_) => return Err(miette::miette!("Source is not an S3 URL: {}", config.source)),
+            NamedChannelOrUrl::Url(url) => {
+                let scheme = url.scheme();
+                if scheme != "s3" {
+                    return Err(miette::miette!("Invalid S3 URL: {}", url));
+                }
+                let host = url.host().ok_or(miette::miette!("Invalid S3 URL: {}", url))?;
+                host.to_string()
+            },
+        };
+        memory_storage.store(s3_host.as_str(), &Authentication::S3Credentials {
+            access_key_id: s3_credentials.access_key_id,
+            secret_access_key: s3_credentials.secret_access_key,
+            session_token: s3_credentials.session_token,
+        }).into_diagnostic()?;
+        auth_store.backends.insert(0, Arc::new(memory_storage));
+        auth_store
+    } else {
+        AuthenticationStorage::from_env_and_defaults().into_diagnostic()?
+    };
+
+    client_builder = client_builder.with_arc(Arc::new(AuthenticationMiddleware::from_auth_storage(auth_store)));
 
     client_builder = client_builder.with(RetryTransientMiddleware::new_with_policy(
         ExponentialBackoff::builder().build_with_max_retries(3),

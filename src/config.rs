@@ -56,17 +56,18 @@ pub struct CliConfig {
     #[arg(long, requires_all = ["s3_endpoint_url_destination", "s3_region_destination"])]
     pub s3_force_path_style_destination: Option<bool>,
 
-    // /// The access key ID for the S3 bucket.
-    // #[arg(long, env = "S3_ACCESS_KEY_ID_SOURCE", requires_all = ["s3_secret_access_key_source"])]
-    // pub s3_access_key_id_source: Option<String>,
+    /// The access key ID for the S3 bucket.
+    #[arg(long, env = "S3_ACCESS_KEY_ID_SOURCE", requires_all = ["s3_secret_access_key_source"])]
+    pub s3_access_key_id_source: Option<String>,
 
-    // /// The secret access key for the S3 bucket.
-    // #[arg(long, env = "S3_SECRET_ACCESS_KEY_SOURCE", requires_all = ["s3_access_key_id_source"])]
-    // pub s3_secret_access_key_source: Option<String>,
+    /// The secret access key for the S3 bucket.
+    #[arg(long, env = "S3_SECRET_ACCESS_KEY_SOURCE", requires_all = ["s3_access_key_id_source"])]
+    pub s3_secret_access_key_source: Option<String>,
 
-    // /// The session token for the S3 bucket.
-    // #[arg(long, env = "S3_SESSION_TOKEN_SOURCE", requires_all = ["s3_access_key_id_source", "s3_secret_access_key_source"])]
-    // pub s3_session_token_source: Option<String>,
+    /// The session token for the S3 bucket.
+    #[arg(long, env = "S3_SESSION_TOKEN_SOURCE", requires_all = ["s3_access_key_id_source", "s3_secret_access_key_source"])]
+    pub s3_session_token_source: Option<String>,
+
     /// The access key ID for the S3 bucket.
     #[arg(long, env = "S3_ACCESS_KEY_ID_DESTINATION", requires_all = ["s3_secret_access_key_destination"])]
     pub s3_access_key_id_destination: Option<String>,
@@ -238,7 +239,7 @@ pub struct CondaMirrorConfig {
     pub mode: MirrorMode,
     pub s3_config_source: Option<S3Config>,
     pub s3_config_destination: Option<S3Config>,
-    // pub s3_credentials_source: Option<S3Credentials>,
+    pub s3_credentials_source: Option<S3Credentials>,
     pub s3_credentials_destination: Option<S3Credentials>,
 }
 

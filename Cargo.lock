@@ -1060,7 +1060,7 @@ dependencies = [
  "opendal",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking",
+ "rattler_networking 0.22.12 (git+https://github.com/pavelzw/rattler?branch=authentication-backend-in-memory)",
  "rattler_repodata_gateway",
  "reqwest-middleware",
  "reqwest-retry",
@@ -3469,7 +3469,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking",
+ "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "rattler_package_streaming",
  "rayon",
  "reqwest",
@@ -3559,6 +3559,32 @@ checksum = "cfe0171ee4c22e335ade0cb926e83cdf08a5dda5eaf26fc21fa9948beb65c764"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
+ "dirs",
+ "fs-err",
+ "getrandom 0.2.15",
+ "http 1.3.1",
+ "itertools",
+ "keyring",
+ "netrc-rs",
+ "reqwest",
+ "reqwest-middleware",
+ "retry-policies",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "rattler_networking"
+version = "0.22.12"
+source = "git+https://github.com/pavelzw/rattler?branch=authentication-backend-in-memory#6baafb8743854a69681e2b6c5c6c76b3605145ae"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "base64 0.22.1",
@@ -3594,7 +3620,7 @@ dependencies = [
  "num_cpus",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking",
+ "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "rattler_redaction",
  "reqwest",
  "reqwest-middleware",
@@ -3649,7 +3675,7 @@ dependencies = [
  "pin-project-lite",
  "rattler_cache",
  "rattler_digest",
- "rattler_networking",
+ "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "rattler_redaction",
  "reqwest",
  "reqwest-middleware",

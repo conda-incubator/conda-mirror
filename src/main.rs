@@ -118,18 +118,18 @@ async fn main() -> miette::Result<()> {
         None
     };
 
-    // let s3_credentials_source = if let (Some(access_key_id), Some(secret_access_key)) = (
-    //     cli_config.access_key_id_source,
-    //     cli_config.secret_access_key_source,
-    // ) {
-    //     Some(S3Credentials {
-    //         access_key_id,
-    //         secret_access_key,
-    //         session_token: cli_config.session_token_source,
-    //     })
-    // } else {
-    //     None
-    // };
+    let s3_credentials_source = if let (Some(access_key_id), Some(secret_access_key)) = (
+        cli_config.s3_access_key_id_source,
+        cli_config.s3_secret_access_key_source,
+    ) {
+        Some(S3Credentials {
+            access_key_id,
+            secret_access_key,
+            session_token: cli_config.s3_session_token_source,
+        })
+    } else {
+        None
+    };
 
     let config = CondaMirrorConfig {
         source,
@@ -138,7 +138,7 @@ async fn main() -> miette::Result<()> {
         mode,
         s3_config_source,
         s3_config_destination,
-        // s3_credentials_source,
+        s3_credentials_source,
         s3_credentials_destination,
     };
 
