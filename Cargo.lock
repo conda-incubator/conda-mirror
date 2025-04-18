@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "conda-mirror"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "clap",
  "clap-verbosity-flag",
