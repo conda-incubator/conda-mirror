@@ -29,7 +29,7 @@ rattler_digest = "1.1.1"
 # rattler_networking = { version = "0.22.12", features = [
 #   "s3",
 # ], default-features = false }
-rattler_networking = { git = "https://github.com/pavelzw/rattler", branch = "authentication-backend-in-memory", features = [
+rattler_networking = { git = "https://github.com/conda/rattler", branch = "main", features = [
   "s3",
 ], default-features = false }
 rattler_repodata_gateway = { version = "0.22.5", default-features = false }

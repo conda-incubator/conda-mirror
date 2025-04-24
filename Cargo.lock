@@ -1060,7 +1060,7 @@ dependencies = [
  "opendal",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking 0.22.12 (git+https://github.com/pavelzw/rattler?branch=authentication-backend-in-memory)",
+ "rattler_networking 0.22.12 (git+https://github.com/conda/rattler?branch=main)",
  "rattler_repodata_gateway",
  "reqwest-middleware",
  "reqwest-retry",
@@ -3581,7 +3581,7 @@ dependencies = [
 [[package]]
 name = "rattler_networking"
 version = "0.22.12"
-source = "git+https://github.com/pavelzw/rattler?branch=authentication-backend-in-memory#6baafb8743854a69681e2b6c5c6c76b3605145ae"
+source = "git+https://github.com/conda/rattler?branch=main#6ec8942ce6c6f8566012a3615e709a80c850c52a"
 dependencies = [
  "anyhow",
  "async-trait",
