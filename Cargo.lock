@@ -1060,7 +1060,7 @@ dependencies = [
  "opendal",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking 0.22.12 (git+https://github.com/conda/rattler?branch=main)",
+ "rattler_networking",
  "rattler_repodata_gateway",
  "reqwest-middleware",
  "reqwest-retry",
@@ -2154,7 +2154,7 @@ dependencies = [
  "hyper 0.14.32",
  "log",
  "rustls 0.21.12",
- "rustls-native-certs 0.6.3",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls 0.24.1",
 ]
@@ -2170,7 +2170,6 @@ dependencies = [
  "hyper 1.6.0",
  "hyper-util",
  "rustls 0.23.25",
- "rustls-native-certs 0.8.1",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.2",
@@ -3453,9 +3452,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_cache"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd2ad44802bc15f7196f0898ff52729aab52338203ddbdff5212146f45aa2a67"
+checksum = "b38e4b51282a51819f2b8c0ba8223c8a02f5546a0e4d43c012126dc9932d357d"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -3469,7 +3468,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rattler_networking",
  "rattler_package_streaming",
  "rayon",
  "reqwest",
@@ -3485,9 +3484,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_conda_types"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21c2ed99f2fc8044499c63c65db265f6ec3e0333cdf15bb442d5063187449d51"
+checksum = "dc8dfc4019dba3522879f8c09dcb0e27c3cffe9697f441bb2ffccc061be612d2"
 dependencies = [
  "chrono",
  "core-foundation 0.10.0",
@@ -3553,35 +3552,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_networking"
-version = "0.22.12"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe0171ee4c22e335ade0cb926e83cdf08a5dda5eaf26fc21fa9948beb65c764"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "dirs",
- "fs-err",
- "getrandom 0.2.15",
- "http 1.3.1",
- "itertools",
- "keyring",
- "netrc-rs",
- "reqwest",
- "reqwest-middleware",
- "retry-policies",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.12",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "rattler_networking"
-version = "0.22.12"
-source = "git+https://github.com/conda/rattler?branch=main#6ec8942ce6c6f8566012a3615e709a80c850c52a"
+checksum = "a2d077d88bf9765c5c93c556b9a2c85c53e843816ad40e2501690af59e7af11d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3609,9 +3582,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_package_streaming"
-version = "0.22.36"
+version = "0.22.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11879ff84195638459a15f0bb4c0d167f58ecd497d2df00df46c6cf81c0f2bb7"
+checksum = "34c38c6290bfddb95682e6230091888fbbd0007cd67e5f78fb1d6e7d8aeb0be7"
 dependencies = [
  "bzip2",
  "chrono",
@@ -3620,7 +3593,7 @@ dependencies = [
  "num_cpus",
  "rattler_conda_types",
  "rattler_digest",
- "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rattler_networking",
  "rattler_redaction",
  "reqwest",
  "reqwest-middleware",
@@ -3650,9 +3623,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_repodata_gateway"
-version = "0.22.5"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e25d367f6ff1d83cf925ccacfcf7805f94030f96de6858992db37edb3c5a638"
+checksum = "ceb99427deb57ad4542d72a79f69238359a8802497d8a5fa781848206a70fd96"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3675,7 +3648,7 @@ dependencies = [
  "pin-project-lite",
  "rattler_cache",
  "rattler_digest",
- "rattler_networking 0.22.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rattler_networking",
  "rattler_redaction",
  "reqwest",
  "reqwest-middleware",
@@ -3872,7 +3845,6 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.25",
- "rustls-native-certs 0.8.1",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
@@ -4081,18 +4053,6 @@ dependencies = [
  "rustls-pemfile 1.0.4",
  "schannel",
  "security-framework 2.11.1",
-]
-
-[[package]]
-name = "rustls-native-certs"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcff2dd52b58a8d98a70243663a0d234c4e2b79235637849d15913394a247d3"
-dependencies = [
- "openssl-probe",
- "rustls-pki-types",
- "schannel",
- "security-framework 3.2.0",
 ]
 
 [[package]]
