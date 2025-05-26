@@ -6,6 +6,7 @@ use rattler_conda_types::{
     package::ArchiveType, ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
 };
 use rattler_digest::{compute_bytes_digest, Sha256Hash};
+use rattler_index::write_repodata;
 use rattler_networking::{
     authentication_storage::{backends::memory::MemoryStorage, StorageBackend},
     retry_policies::ExponentialBackoff,
@@ -546,17 +547,10 @@ async fn mirror_subdir<T: Configurator>(
         version: repodata.version,
     };
 
-    let destination_path = format!("{}/repodata.json", subdir.as_str());
-    op.write(
-        destination_path.as_str(),
-        serde_json::to_vec_pretty(&new_repodata).into_diagnostic()?,
-    )
-    .await
-    .into_diagnostic()?;
-    // todo: also write repodata.json.bz2, repodata.json.zst, repodata.json.jlap and sharded repodata once available in rattler
-    // https://github.com/conda/rattler/issues/1096
+    write_repodata(new_repodata, None, true, true, subdir, op)
+        .await
+        .map_err(|e| miette::miette!("Could not write repodata: {}", e))?;
     // todo: check if non-conda and non-repodata files exist, print warning if any
-
     Ok(())
 }
 
