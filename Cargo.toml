@@ -2,7 +2,7 @@
 name = "conda-mirror"
 description = "Mirror conda channels"
 version = "0.11.2"
-edition = "2021"
+edition = "2024"
 
 [features]
 default = ["native-tls"]
