@@ -1,19 +1,19 @@
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
-use opendal::{layers::RetryLayer, Configurator, Operator};
+use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
-    package::ArchiveType, ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
+    ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
-use rattler_digest::{compute_bytes_digest, Sha256Hash};
+use rattler_digest::{Sha256Hash, compute_bytes_digest};
 use rattler_index::write_repodata;
 use rattler_networking::{
-    authentication_storage::{backends::memory::MemoryStorage, StorageBackend},
+    Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
+    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
-    Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
 };
-use reqwest_middleware::{reqwest::Client, ClientBuilder, ClientWithMiddleware};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, reqwest::Client};
 use reqwest_retry::RetryTransientMiddleware;
 use std::{
     collections::{HashMap, HashSet},
@@ -187,7 +187,7 @@ fn get_packages_to_mirror(
     let mut all_packages = HashMap::new();
     all_packages.extend(repodata.packages.clone());
     all_packages.extend(repodata.conda_packages.clone());
-    let packages_to_mirror = match config.mode.clone() {
+    match config.mode.clone() {
         MirrorMode::All => all_packages.clone(),
         MirrorMode::OnlyInclude(include) => all_packages
             .clone()
@@ -208,8 +208,7 @@ fn get_packages_to_mirror(
                 })
             })
             .collect(),
-    };
-    packages_to_mirror
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -636,7 +635,7 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
                 return Err(miette::miette!(
                     "Source is not an S3 URL: {}",
                     config.source
-                ))
+                ));
             }
             NamedChannelOrUrl::Url(url) => {
                 let scheme = url.scheme();
