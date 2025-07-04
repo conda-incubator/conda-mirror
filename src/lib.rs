@@ -593,7 +593,7 @@ async fn get_subdirs(
 fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware> {
     let client = Client::builder()
         .pool_max_idle_per_host(20)
-        .user_agent("conda-mirror")
+        .user_agent(format!("conda-mirror/{}", env!("CARGO_PKG_VERSION")))
         .read_timeout(Duration::from_secs(30))
         .build()
         .expect("failed to create reqwest Client");
