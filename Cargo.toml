@@ -18,14 +18,14 @@ rustls-tls = [
 ]
 
 [dependencies]
-clap = { version = "4.5.40", features = ["derive", "string", "env"] }
+clap = { version = "4.5.42", features = ["derive", "string", "env"] }
 clap-verbosity-flag = { version = "3.0.3", features = ["tracing"] }
 console = "0.15.11"
 futures = "0.3.31"
 glob = "0.3.2"
 indicatif = "0.17.11"
 miette = { version = "7.6.0", features = ["fancy"] }
-opendal = { version = "0.53.3", features = ["services-s3", "services-fs"] }
+opendal = { version = "0.54.0", features = ["services-s3", "services-fs"] }
 rattler_conda_types = "0.35.0"
 rattler_digest = "1.1.2"
 rattler_index = { version = "0.23.0", default-features = false }
@@ -36,7 +36,7 @@ rattler_repodata_gateway = { version = "0.23.0", default-features = false }
 reqwest-middleware = "0.4.2"
 reqwest-retry = "0.7.0"
 serde = "1.0.219"
-serde_json = "1.0.140"
+serde_json = "1.0.142"
 serde_yml = "0.0.12"
 sha2 = "0.10.9"
 tokio = { version = "1.45.1", features = ["full"] }
