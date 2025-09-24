@@ -9,7 +9,10 @@ use rattler_digest::{Sha256Hash, compute_bytes_digest};
 use rattler_index::write_repodata;
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
-    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
+    authentication_storage::{
+        StorageBackend,
+        backends::{file, memory::MemoryStorage},
+    },
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
@@ -428,6 +431,7 @@ async fn mirror_subdir<T: Configurator>(
     semaphore: Arc<Semaphore>,
 ) -> miette::Result<()> {
     let repodata_url = config.repodata_url(subdir)?;
+    let append_mode = config.append;
     let repodata = if repodata_url.scheme() == "file" {
         RepoData::from_path(
             repodata_url
@@ -474,30 +478,39 @@ async fn mirror_subdir<T: Configurator>(
         packages_to_mirror.len(),
         subdir,
     );
-    let packages_to_delete = available_packages
-        .difference(&packages_to_mirror.keys().cloned().collect::<HashSet<_>>())
-        .cloned()
-        .collect::<Vec<_>>();
+    // Compute deletions unless we're in append mode.
+    let packages_to_delete = if append_mode {
+        Vec::new()
+    } else {
+        available_packages
+            .difference(&packages_to_mirror.keys().cloned().collect::<HashSet<_>>())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let mut packages_to_add = HashMap::new();
     for (filename, package) in packages_to_mirror.clone() {
         if !available_packages.contains(&filename) {
             packages_to_add.insert(filename, package);
         }
     }
-
-    tracing::info!(
-        "Deleting {} existing packages in {}",
-        packages_to_delete.len(),
-        subdir
-    );
-    dispatch_tasks_delete(
-        packages_to_delete,
-        subdir,
-        progress.clone(),
-        semaphore.clone(),
-        op.clone(),
-    )
-    .await?;
+    // We only want to log/perform deletes when not appending
+    if !packages_to_delete.is_empty() {
+        tracing::info!(
+            "Deleting {} existing packages in {}",
+            packages_to_delete.len(),
+            subdir
+        );
+    }
+    if !append_mode {
+        dispatch_tasks_delete(
+            packages_to_delete,
+            subdir,
+            progress.clone(),
+            semaphore.clone(),
+            op.clone(),
+        )
+        .await?;
+    }
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
     dispatch_tasks_add(
@@ -512,32 +525,40 @@ async fn mirror_subdir<T: Configurator>(
     .await?;
 
     /* ---------------------------- WRITE REPODATA ---------------------------- */
-    let packages = packages_to_mirror
+    // In append mode, repodata should reflect everything present after this run which will be
+    // union(existing files, newly added). Otherwise, keep true mirror.
+    let filenames_to_index: HashSet<String> = if append_mode {
+        // Files that already existed before this run.
+        let previously_available = available_packages;
+        // Files we're adding now which are present in the desired set but not in previously available.
+        let newly_added_files = packages_to_mirror
+            .keys()
+            .filter(|k| !previously_available.contains(*k))
+            .cloned()
+            .collect::<HashSet<_>>();
+        previously_available
+            .into_iter()
+            .chain(newly_added_files.into_iter())
+            .collect()
+    } else {
+        // Mirror only what we want this run.
+        packages_to_mirror.keys().cloned().collect()
+    };
+    // Build maps from source repodata records for the filenames we want to index
+    // (We only index fiels that exist in the source repodata)
+    let packages = repodata
+        .packages
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => true,
-                Some(ArchiveType::Conda) => false,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
+        .filter(|(filename, _)| filenames_to_index.contains(*filename))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let conda_packages = packages_to_mirror
+    let conda_packages = repodata
+        .conda_packages
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => false,
-                Some(ArchiveType::Conda) => true,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
+        .filter(|(filename, _)| filenames_to_index.contains(*filename))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+
     let new_repodata = RepoData {
         info: repodata.info,
         packages,

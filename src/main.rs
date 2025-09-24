@@ -58,6 +58,13 @@ async fn main() -> miette::Result<()> {
         (None, None) => MirrorMode::All,
     };
 
+    // Resolve append mode: CLI overrides YAML (default false)
+    let append = if cli_config.append {
+        true
+    } else {
+        yaml_config.append.unwrap_or(false)
+    };
+
     let s3_config_destination = if let (Some(endpoint_url), Some(region), Some(force_path_style)) = (
         cli_config.s3_endpoint_url_destination,
         cli_config.s3_region_destination,
@@ -140,6 +147,7 @@ async fn main() -> miette::Result<()> {
         s3_config_destination,
         s3_credentials_source,
         s3_credentials_destination,
+        append,
     };
 
     tracing::info!("Using configuration: {:?}", config);
