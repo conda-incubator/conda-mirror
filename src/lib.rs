@@ -11,7 +11,7 @@ use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     authentication_storage::{
         StorageBackend,
-        backends::{file, memory::MemoryStorage},
+        backends::memory::MemoryStorage,
     },
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
