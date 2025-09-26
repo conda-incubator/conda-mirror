@@ -119,7 +119,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
     let subdirs = get_subdirs(&config, client.clone()).await?;
     tracing::info!("Mirroring the following subdirs: {:?}", subdirs);
 
-    let max_parallel = 32;
+    let max_parallel = config.max_parallel as usize;
     let multi_progress = Arc::new(MultiProgress::new());
     let semaphore = Arc::new(Semaphore::new(max_parallel));
 
@@ -451,7 +451,7 @@ async fn mirror_subdir<T: Configurator>(
     let builder = opendal_config.into_builder();
     let op = Operator::new(builder)
         .into_diagnostic()?
-        .layer(RetryLayer::new())
+        .layer(RetryLayer::new().with_max_times(config.max_retries.into()))
         .finish();
     let available_packages = op
         .list_with(&format!("{}/", subdir.as_str()))
@@ -669,7 +669,7 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
     ));
 
     client_builder = client_builder.with(RetryTransientMiddleware::new_with_policy(
-        ExponentialBackoff::builder().build_with_max_retries(3),
+        ExponentialBackoff::builder().build_with_max_retries(config.max_retries.into()),
     ));
 
     let authenticated_client = client_builder.build();
