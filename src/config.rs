@@ -46,7 +46,6 @@ pub struct CliConfig {
     #[arg(long, default_value_t = 32)]
     pub max_parallel: u8,
 
-
     /// The S3 endpoint URL.
     #[arg(long, requires_all = ["s3_region_source", "s3_force_path_style_source"])]
     pub s3_endpoint_url_source: Option<Url>,
