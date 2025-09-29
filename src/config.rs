@@ -38,6 +38,15 @@ pub struct CliConfig {
     #[arg(long)]
     pub append: bool,
 
+    /// Maximum number of retries.
+    #[arg(long, default_value_t = 10)]
+    pub max_retries: u8,
+
+    /// Maximum number of concurrent connections.
+    #[arg(long, default_value_t = 32)]
+    pub max_parallel: u8,
+
+
     /// The S3 endpoint URL.
     #[arg(long, requires_all = ["s3_region_source", "s3_force_path_style_source"])]
     pub s3_endpoint_url_source: Option<Url>,
@@ -217,6 +226,9 @@ pub struct CondaMirrorYamlConfig {
     pub destination: Option<NamedChannelOrUrl>,
     pub subdirs: Option<Vec<Platform>>,
 
+    pub max_retries: Option<u8>,
+    pub max_parallel: Option<u8>,
+
     pub include: Option<Vec<PackageConfig>>,
     pub exclude: Option<Vec<PackageConfig>>,
     pub append: Option<bool>,
@@ -244,6 +256,8 @@ pub struct CondaMirrorConfig {
     pub destination: NamedChannelOrUrl,
     pub subdirs: Option<Vec<Platform>>,
     pub mode: MirrorMode,
+    pub max_retries: u8,
+    pub max_parallel: u8,
     pub s3_config_source: Option<S3Config>,
     pub s3_config_destination: Option<S3Config>,
     pub s3_credentials_source: Option<S3Credentials>,
