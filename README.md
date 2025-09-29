@@ -146,7 +146,7 @@ subdirs:
 
 When trying to add new packages to existing mirror, the `--append` flag can be used to prevent deletion of existing packages (default behavior). The repodata will be rewritten with this flag enabled.
 
-**Notes** 
+**Notes**
 - The CLI option will override the YAML option.
 - In append mode the tool skips deletions and repodata is written for the union of previously present files plus the files added in the current run.
 - Files that exist locally but are not in the source `repodata.json` won't be indexed.
