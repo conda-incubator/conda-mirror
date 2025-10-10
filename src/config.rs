@@ -88,6 +88,10 @@ pub struct CliConfig {
     #[arg(long, env = "S3_SESSION_TOKEN_DESTINATION", requires_all = ["s3_access_key_id_destination", "s3_secret_access_key_destination"])]
     pub s3_session_token_destination: Option<String>,
 
+    /// Disable progress bar.
+    #[arg(long, default_value_t = false)]
+    pub no_progress: bool,
+
     // todo: add --force option
     #[command(flatten)]
     pub verbose: Verbosity,
@@ -250,6 +254,7 @@ pub struct CondaMirrorConfig {
     pub mode: MirrorMode,
     pub max_retries: u8,
     pub max_parallel: u8,
+    pub no_progress: bool,
     pub s3_config_source: Option<S3Config>,
     pub s3_config_destination: Option<S3Config>,
     pub s3_credentials_source: Option<S3Credentials>,

@@ -1,4 +1,4 @@
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesOrdered};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use opendal::{Configurator, Operator, layers::RetryLayer};
@@ -123,8 +123,12 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
     let multi_progress = Arc::new(MultiProgress::new());
     let semaphore = Arc::new(Semaphore::new(max_parallel));
 
-    let mut tasks = FuturesUnordered::new();
-    for subdir in subdirs {
+    if config.no_progress {
+        multi_progress.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+
+    let mut tasks = FuturesOrdered::new();
+    for subdir in subdirs.clone() {
         let config = config.clone();
         let client = client.clone();
         let multi_progress = multi_progress.clone();
@@ -157,20 +161,21 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                 }
             }
         };
-        tasks.push(tokio::spawn(task));
+        tasks.push_back(tokio::spawn(task));
     }
 
     let mut failed = Vec::new();
+    let mut counter = 0;
     while let Some(join_result) = tasks.next().await {
+        counter += 1;
         match join_result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::error!("Failed to process subdir: {}", e);
-                failed.push(e);
+                tracing::error!("Failed to process subdir {}: {}", subdirs[counter], e);
+                failed.push((subdirs[counter], e));
             }
             Err(join_err) => {
                 tracing::error!("Task panicked: {}", join_err);
-                tasks.clear();
                 return Err(miette::miette!("Task panicked: {}", join_err));
             }
         }
@@ -183,8 +188,8 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
             "❌ Mirroring completed. {} subdirs had failures.",
             failed.len()
         );
-        for error in failed {
-            eprintln!(" - {}", error);
+        for (subdir, error) in failed {
+            eprintln!(" - {}: {}", subdir, error);
         }
     }
 
@@ -230,7 +235,7 @@ async fn dispatch_tasks_delete(
     semaphore: Arc<Semaphore>,
     op: Operator,
 ) -> miette::Result<()> {
-    let mut tasks = FuturesUnordered::new();
+    let mut tasks = FuturesOrdered::new();
     if !packages_to_delete.is_empty() {
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_delete.len() as u64)));
         let sty = ProgressStyle::with_template(
@@ -242,7 +247,7 @@ async fn dispatch_tasks_delete(
         let packages_to_delete_len = packages_to_delete.len();
 
         let pb = pb.clone();
-        for filename in packages_to_delete {
+        for filename in packages_to_delete.clone() {
             let pb = pb.clone();
             let semaphore = semaphore.clone();
             let op = op.clone();
@@ -266,21 +271,26 @@ async fn dispatch_tasks_delete(
                 let res: miette::Result<()> = Ok(());
                 res
             };
-            tasks.push(tokio::spawn(task));
+            tasks.push_back(tokio::spawn(task));
         }
 
         let mut succeeded = Vec::new();
         let mut failed = Vec::new();
+        let mut counter = 0;
         while let Some(join_result) = tasks.next().await {
+            counter += 1;
             match join_result {
                 Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tracing::error!("Failed to delete package: {}", e);
+                    tracing::error!(
+                        "Failed to delete package {subdir}/{}: {}",
+                        packages_to_delete[counter],
+                        e
+                    );
                     failed.push(e);
                     pb.inc(1);
                 }
                 Err(join_err) => {
-                    tasks.clear();
                     tracing::error!("Task panicked: {}", join_err);
                     pb.abandon_with_message(format!(
                         "{} {}",
@@ -329,7 +339,7 @@ async fn dispatch_tasks_add(
     op: Operator,
 ) -> miette::Result<()> {
     if !packages_to_add.is_empty() {
-        let mut tasks = FuturesUnordered::new();
+        let mut tasks = FuturesOrdered::new();
 
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
         let sty = ProgressStyle::with_template(
@@ -341,6 +351,7 @@ async fn dispatch_tasks_add(
         let packages_to_add_len = packages_to_add.len();
 
         let pb = pb.clone();
+        let filenames = packages_to_add.keys().cloned().collect::<Vec<_>>();
         for (filename, package_record) in packages_to_add {
             let pb = pb.clone();
             let semaphore = semaphore.clone();
@@ -388,6 +399,7 @@ async fn dispatch_tasks_add(
 
                 // use opendal to upload the package
                 let destination_path = format!("{}/{}", subdir.as_str(), filename);
+                // TODO: Verify digest on S3 remote.
                 op.write(destination_path.as_str(), buf)
                     .await
                     .into_diagnostic()?;
@@ -396,21 +408,26 @@ async fn dispatch_tasks_add(
                 let res: miette::Result<()> = Ok(());
                 res
             };
-            tasks.push(tokio::spawn(task));
+            tasks.push_back(tokio::spawn(task));
         }
 
         let mut succeeded = Vec::new();
         let mut failed = Vec::new();
+        let mut counter = 0;
         while let Some(join_result) = tasks.next().await {
+            counter += 1;
             match join_result {
                 Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tracing::error!("Failed to add package: {}", e);
+                    tracing::error!(
+                        "Failed to add package {subdir}/{}: {}",
+                        filenames[counter],
+                        e
+                    );
                     pb.inc(1);
                     failed.push(e);
                 }
                 Err(join_err) => {
-                    tasks.clear();
                     tracing::error!("Task panicked: {}", join_err);
                     pb.abandon_with_message(format!(
                         "{} {}",
