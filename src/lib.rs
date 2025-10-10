@@ -301,8 +301,9 @@ async fn dispatch_tasks_delete(
                 }
             }
         }
-        tracing::debug!(
-            "Deleted {} packages in subdir {}",
+        tracing::info!(
+            "Deleted {}/{} packages in subdir {}",
+            packages_to_delete_len - failed.len(),
             packages_to_delete_len,
             subdir.as_str()
         );
@@ -438,8 +439,9 @@ async fn dispatch_tasks_add(
                 }
             }
         }
-        tracing::debug!(
-            "Added {} packages in subdir {}",
+        tracing::info!(
+            "Added {}/{} packages in subdir {}",
+            packages_to_add_len - failed.len(),
             packages_to_add_len,
             subdir.as_str()
         );
