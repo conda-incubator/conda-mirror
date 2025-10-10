@@ -188,7 +188,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
             "❌ Mirroring completed. {} subdirs had failures.",
             failed.len()
         );
-        for (subdir, error) in failed {
+        for (subdir, error) in &failed {
             eprintln!(" - {}: {}", subdir, error);
         }
         return Err(miette::miette!(
