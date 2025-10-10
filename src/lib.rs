@@ -6,7 +6,7 @@ use rattler_conda_types::{
     ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
 use rattler_digest::{Sha256Hash, compute_bytes_digest};
-use rattler_index::write_repodata;
+use rattler_index::{RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
@@ -160,13 +160,13 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         tasks.push(tokio::spawn(task));
     }
 
+    let mut failed = Vec::new();
     while let Some(join_result) = tasks.next().await {
         match join_result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 tracing::error!("Failed to process subdir: {}", e);
-                tasks.clear();
-                return Err(e);
+                failed.push(e);
             }
             Err(join_err) => {
                 tracing::error!("Task panicked: {}", join_err);
@@ -176,7 +176,18 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         }
     }
 
-    eprintln!("✅ Mirroring completed");
+    if failed.is_empty() {
+        eprintln!("✅ All subdirs mirrored successfully");
+    } else {
+        eprintln!(
+            "❌ Mirroring completed. {} subdirs had failures.",
+            failed.len()
+        );
+        for error in failed {
+            eprintln!(" - {}", error);
+        }
+    }
+
     Ok(())
 }
 
@@ -258,19 +269,15 @@ async fn dispatch_tasks_delete(
             tasks.push(tokio::spawn(task));
         }
 
-        let mut results = Vec::new();
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
         while let Some(join_result) = tasks.next().await {
             match join_result {
-                Ok(Ok(result)) => results.push(result),
+                Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tasks.clear();
                     tracing::error!("Failed to delete package: {}", e);
-                    pb.abandon_with_message(format!(
-                        "{} {}",
-                        console::style("Failed to delete packages in").red(),
-                        console::style(subdir.as_str()).dim()
-                    ));
-                    return Err(e);
+                    failed.push(e);
+                    pb.inc(1);
                 }
                 Err(join_err) => {
                     tasks.clear();
@@ -285,15 +292,28 @@ async fn dispatch_tasks_delete(
             }
         }
         tracing::debug!(
-            "Successfully deleted {} packages in subdir {}",
+            "Deleted {} packages in subdir {}",
             packages_to_delete_len,
             subdir.as_str()
         );
-        pb.finish_with_message(format!(
-            "{} {}",
-            console::style("Finished deleting packages in").green(),
-            subdir.as_str()
-        ));
+        if failed.is_empty() {
+            pb.finish_with_message(format!(
+                "{} {}",
+                console::style("Finished deleting packages in").green(),
+                console::style(subdir.as_str()).bold()
+            ));
+        } else {
+            pb.abandon_with_message(format!(
+                "{} {} with {} failures",
+                console::style("Finished deleting packages in").red(),
+                console::style(subdir.as_str()).bold(),
+                failed.len()
+            ));
+            return Err(miette::miette!(
+                "Failed to delete {} packages",
+                failed.len()
+            ));
+        }
     }
     Ok(())
 }
@@ -379,19 +399,15 @@ async fn dispatch_tasks_add(
             tasks.push(tokio::spawn(task));
         }
 
-        let mut results = Vec::new();
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
         while let Some(join_result) = tasks.next().await {
             match join_result {
-                Ok(Ok(result)) => results.push(result),
+                Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tasks.clear();
                     tracing::error!("Failed to add package: {}", e);
-                    pb.abandon_with_message(format!(
-                        "{} {}",
-                        console::style("Failed to add packages in").red(),
-                        console::style(subdir.as_str()).dim()
-                    ));
-                    return Err(e);
+                    pb.inc(1);
+                    failed.push(e);
                 }
                 Err(join_err) => {
                     tasks.clear();
@@ -406,15 +422,25 @@ async fn dispatch_tasks_add(
             }
         }
         tracing::debug!(
-            "Successfully added {} packages in subdir {}",
+            "Added {} packages in subdir {}",
             packages_to_add_len,
             subdir.as_str()
         );
-        pb.finish_with_message(format!(
-            "{} {}",
-            console::style("Finished adding packages in").green(),
-            subdir.as_str()
-        ));
+        if failed.is_empty() {
+            pb.finish_with_message(format!(
+                "{} {}",
+                console::style("Finished adding packages in").green(),
+                console::style(subdir.as_str()).bold()
+            ));
+        } else {
+            pb.abandon_with_message(format!(
+                "{} {} with {} failures",
+                console::style("Finished adding packages in").red(),
+                console::style(subdir.as_str()).bold(),
+                failed.len()
+            ));
+            return Err(miette::miette!("Failed to add {} packages", failed.len()));
+        }
     }
     Ok(())
 }
@@ -545,8 +571,10 @@ async fn mirror_subdir<T: Configurator>(
         removed: repodata.removed,
         version: repodata.version,
     };
-
-    write_repodata(new_repodata, None, true, true, subdir, op)
+    let metadata = RepodataMetadataCollection::new(&op, subdir, true, true, true)
+        .await
+        .into_diagnostic()?;
+    write_repodata(new_repodata, None, subdir, op, &metadata)
         .await
         .map_err(|e| miette::miette!("Could not write repodata: {}", e))?;
     // todo: check if non-conda and non-repodata files exist, print warning if any
