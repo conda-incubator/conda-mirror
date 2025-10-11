@@ -303,11 +303,9 @@ impl CondaMirrorConfig {
     }
 
     pub(crate) fn repodata_url(&self, platform: Platform) -> Url {
-        let repodata_url = self
-            .platform_url(platform)
+        self.platform_url(platform)
             .join("repodata.json")
-            .expect("repodata.json can be joined");
-        repodata_url
+            .expect("repodata.json can be joined")
     }
 
     pub(crate) fn package_url(
