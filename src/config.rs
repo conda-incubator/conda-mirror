@@ -263,6 +263,8 @@ pub struct CondaMirrorConfig {
 }
 
 impl CondaMirrorConfig {
+    // this needs to be refactored anyway in https://github.com/conda-incubator/conda-mirror/issues/97
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: NamedChannelOrUrl,
         destination: NamedChannelOrUrl,
