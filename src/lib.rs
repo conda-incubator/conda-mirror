@@ -785,31 +785,31 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
     let mut client_builder = ClientBuilder::new(client.clone());
 
     let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-    if let NamedChannelOrUrl::Url(source_url) = config.source.clone() {
-        if source_url.scheme() == "s3" {
-            let s3_host = source_url
-                .host()
-                .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
-                .to_string();
-            let s3_config = config
-                .clone()
-                .s3_config_source
-                .ok_or(miette::miette!("No S3 source config set"))?;
+    if let NamedChannelOrUrl::Url(source_url) = config.source.clone()
+        && source_url.scheme() == "s3"
+    {
+        let s3_host = source_url
+            .host()
+            .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
+            .to_string();
+        let s3_config = config
+            .clone()
+            .s3_config_source
+            .ok_or(miette::miette!("No S3 source config set"))?;
 
-            let s3_middleware = S3Middleware::new(
-                HashMap::from([(
-                    s3_host,
-                    S3Config::Custom {
-                        endpoint_url: s3_config.endpoint_url,
-                        region: s3_config.region,
-                        force_path_style: s3_config.force_path_style,
-                    },
-                )]),
-                // TODO: once rattler has a custom InMemoryBackend, add this to auth_store with custom source credentials
-                auth_store,
-            );
-            client_builder = client_builder.with(s3_middleware);
-        }
+        let s3_middleware = S3Middleware::new(
+            HashMap::from([(
+                s3_host,
+                S3Config::Custom {
+                    endpoint_url: s3_config.endpoint_url,
+                    region: s3_config.region,
+                    force_path_style: s3_config.force_path_style,
+                },
+            )]),
+            // TODO: once rattler has a custom InMemoryBackend, add this to auth_store with custom source credentials
+            auth_store,
+        );
+        client_builder = client_builder.with(s3_middleware);
     }
 
     let auth_store = if let Some(s3_credentials) = config.s3_credentials_source.clone() {

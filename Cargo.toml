@@ -10,11 +10,13 @@ native-tls = [
   "rattler_networking/native-tls",
   "rattler_repodata_gateway/native-tls",
   "rattler_index/native-tls",
+  "reqwest/native-tls",
 ]
 rustls-tls = [
   "rattler_networking/rustls-tls",
   "rattler_repodata_gateway/rustls-tls",
   "rattler_index/rustls-tls",
+  "reqwest/rustls-tls",
 ]
 
 [dependencies]
