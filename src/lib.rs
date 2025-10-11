@@ -59,6 +59,10 @@ pub enum MirrorPackageErrorKind {
     Upload(String, #[source] opendal::Error),
     #[error("failed to delete {0}: {1}")]
     Delete(String, #[source] opendal::Error),
+    #[error("failed to parse URL: {0}")]
+    ParseUrl(#[source] url::ParseError),
+    #[error("error while fetching {url}: got status {status}")]
+    UnsuccessfulFetch { status: StatusCode, url: Url },
 }
 
 #[derive(Debug, Error)]
@@ -472,7 +476,10 @@ async fn dispatch_tasks_add(
                 ));
 
                 // use rattler client for downloading the package
-                let package_url = config.package_url(filename.as_str(), subdir).unwrap(); // TODO: handle this potential error
+                let package_url = config
+                    .package_url(filename.as_str(), subdir)
+                    .map_err(MirrorPackageErrorKind::ParseUrl)
+                    .with_filename(&filename)?;
                 let mut buf = Vec::new();
                 if package_url.scheme() == "file" {
                     let path = package_url.to_file_path().unwrap();
@@ -491,7 +498,13 @@ async fn dispatch_tasks_add(
                         .await
                         .map_err(|e| MirrorPackageErrorKind::SendRequest(package_url.clone(), e))
                         .with_filename(&filename)?;
-                    // TODO: response status success
+                    if !response.status().is_success() {
+                        return Err(MirrorPackageErrorKind::UnsuccessfulFetch {
+                            status: response.status(),
+                            url: package_url,
+                        })
+                        .with_filename(&filename);
+                    }
                     let bytes = response
                         .bytes()
                         .await
@@ -594,7 +607,7 @@ async fn mirror_subdir<T: Configurator>(
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
 ) -> Result<(), MirrorSubdirError> {
-    let repodata_url = config.repodata_url(subdir).unwrap();
+    let repodata_url = config.repodata_url(subdir);
     let repodata = if repodata_url.scheme() == "file" {
         let repodata_path = repodata_url.to_file_path().unwrap();
         RepoData::from_path(&repodata_path)
@@ -750,7 +763,7 @@ async fn get_subdirs(
 
     for subdir in Platform::all() {
         tracing::debug!("Checking subdir: {}", subdir);
-        let repodata_url = config.repodata_url(subdir)?;
+        let repodata_url = config.repodata_url(subdir);
 
         // todo: parallelize
         if repodata_url.scheme() == "file" {

@@ -142,19 +142,19 @@ async fn main() -> miette::Result<()> {
     } else {
         None
     };
-    let config = CondaMirrorConfig {
+    let config = CondaMirrorConfig::new(
         source,
         destination,
         subdirs,
         mode,
         max_retries,
         max_parallel,
-        no_progress: cli_config.no_progress,
+        cli_config.no_progress,
         s3_config_source,
         s3_config_destination,
         s3_credentials_source,
         s3_credentials_destination,
-    };
+    )?;
 
     tracing::info!("Using configuration: {:?}", config);
 

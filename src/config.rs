@@ -1,7 +1,7 @@
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
-    ChannelConfig, MatchSpec, Matches, NamedChannelOrUrl, NamelessMatchSpec, PackageRecord,
-    Platform,
+    Channel, ChannelConfig, MatchSpec, Matches, NamedChannelOrUrl, NamelessMatchSpec,
+    PackageRecord, Platform,
 };
 use serde::{Deserialize, Deserializer};
 use std::{env::current_dir, path::PathBuf, str::FromStr};
@@ -259,34 +259,62 @@ pub struct CondaMirrorConfig {
     pub s3_config_destination: Option<S3Config>,
     pub s3_credentials_source: Option<S3Credentials>,
     pub s3_credentials_destination: Option<S3Credentials>,
+    pub channel_source: Channel,
 }
 
 impl CondaMirrorConfig {
-    fn platform_url(&self, platform: Platform) -> miette::Result<Url> {
-        let channel = self
-            .source
+    pub fn new(
+        source: NamedChannelOrUrl,
+        destination: NamedChannelOrUrl,
+        subdirs: Option<Vec<Platform>>,
+        mode: MirrorMode,
+        max_retries: u8,
+        max_parallel: u8,
+        no_progress: bool,
+        s3_config_source: Option<S3Config>,
+        s3_config_destination: Option<S3Config>,
+        s3_credentials_source: Option<S3Credentials>,
+        s3_credentials_destination: Option<S3Credentials>,
+    ) -> miette::Result<Self> {
+        let channel_source = source
             .clone()
             .into_channel(&ChannelConfig::default_with_root_dir(
                 current_dir().into_diagnostic()?,
             ))
             .into_diagnostic()?;
-
-        Ok(channel.platform_url(platform))
+        Ok(Self {
+            source,
+            destination,
+            subdirs,
+            mode,
+            max_retries,
+            max_parallel,
+            no_progress,
+            s3_config_source,
+            s3_config_destination,
+            s3_credentials_source,
+            s3_credentials_destination,
+            channel_source,
+        })
     }
 
-    pub(crate) fn repodata_url(&self, platform: Platform) -> miette::Result<Url> {
+    fn platform_url(&self, platform: Platform) -> Url {
+        self.channel_source.platform_url(platform)
+    }
+
+    pub(crate) fn repodata_url(&self, platform: Platform) -> Url {
         let repodata_url = self
-            .platform_url(platform)?
+            .platform_url(platform)
             .join("repodata.json")
-            .into_diagnostic()?;
-        Ok(repodata_url)
+            .expect("repodata.json can be joined");
+        repodata_url
     }
 
-    pub(crate) fn package_url(&self, filename: &str, platform: Platform) -> miette::Result<Url> {
-        let package_url = self
-            .platform_url(platform)?
-            .join(filename)
-            .into_diagnostic()?;
-        Ok(package_url)
+    pub(crate) fn package_url(
+        &self,
+        filename: &str,
+        platform: Platform,
+    ) -> Result<Url, url::ParseError> {
+        self.platform_url(platform).join(filename)
     }
 }
