@@ -66,7 +66,7 @@ pub enum MirrorPackageErrorKind {
 pub struct MirrorPackageError {
     pub filename: String,
     #[source]
-    pub source: MirrorPackageErrorKind,
+    pub source: Box<MirrorPackageErrorKind>,
 }
 
 trait WithFileContext<T> {
@@ -80,7 +80,7 @@ where
     fn with_filename(self, filename: &str) -> Result<T, MirrorPackageError> {
         self.map_err(|err| MirrorPackageError {
             filename: filename.to_string(),
-            source: err.into(),
+            source: Box::new(err.into()),
         })
     }
 }
@@ -507,10 +507,10 @@ async fn dispatch_tasks_add(
                     if expected_digest != digest {
                         return Err(MirrorPackageError {
                             filename,
-                            source: MirrorPackageErrorKind::InvalidDigest {
+                            source: Box::new(MirrorPackageErrorKind::InvalidDigest {
                                 expected: expected_digest,
                                 actual: digest,
-                            },
+                            }),
                         });
                     }
                     tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
