@@ -28,6 +28,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, sync::Semaphore, task::JoinError};
+use tracing::info;
 use url::Url;
 
 pub mod config;
@@ -608,12 +609,15 @@ async fn mirror_subdir<T: Configurator>(
     semaphore: Arc<Semaphore>,
 ) -> Result<(), MirrorSubdirError> {
     let repodata_url = config.repodata_url(subdir);
+    // TODO: implement spinner for repodata fetching, use rattler-repodata-gateway for sharded repodata?
     let repodata = if repodata_url.scheme() == "file" {
         let repodata_path = repodata_url.to_file_path().unwrap();
+        info!("Reading repodata from {}", repodata_path.to_string_lossy());
         RepoData::from_path(&repodata_path)
             .map_err(|e| MirrorSubdirErrorKind::FailedToReadRepodata(repodata_path, e))
             .with_subdir(subdir)?
     } else {
+        info!("Fetching repodata from {repodata_url}");
         let response = client
             .get(repodata_url.clone())
             .send()
