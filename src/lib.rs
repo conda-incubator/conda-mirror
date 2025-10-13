@@ -1,5 +1,5 @@
 use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
@@ -20,11 +20,11 @@ use reqwest_middleware::{
 };
 use reqwest_retry::RetryTransientMiddleware;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env::current_dir,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, sync::Semaphore, task::JoinError};
@@ -458,13 +458,38 @@ async fn dispatch_tasks_add(
         pb.set_style(sty);
         let packages_to_add_len = packages_to_add.len();
 
+        // Progress bar for overall speed/time tracking
+        let pb_speed = Arc::new(progress.add(ProgressBar::new_spinner()));
+        pb_speed.set_style(
+            ProgressStyle::with_template("{spinner:.green} | {elapsed_precise} | {msg}").unwrap(),
+        );
+        pb_speed.enable_steady_tick(std::time::Duration::from_millis(150));
+
+        let total_downloaded = Arc::new(tokio::sync::Mutex::new(0u64));
+        let total_size_bytes = packages_to_add
+            .values()
+            .map(|p| p.size.unwrap_or(0))
+            .sum::<u64>();
+
+        // Shared speed tracking state: (history, window, overall_avg_speed)
+        let speed_tracker = Arc::new(tokio::sync::Mutex::new((
+            VecDeque::<(Instant, u64)>::new(), //stores all records which were completed in last 20 seconds
+            Duration::from_secs(20),
+            0.0f64, //overall average speed
+        )));
+
+        let start = std::time::Instant::now();
+
         let pb = pb.clone();
         for (filename, package_record) in packages_to_add {
             let pb = pb.clone();
+            let pb_speed = pb_speed.clone();
             let semaphore = semaphore.clone();
             let config = config.clone();
             let client = client.clone();
             let op = op.clone();
+            let total_downloaded = total_downloaded.clone();
+            let speed_tracker = speed_tracker.clone();
             let task = async move {
                 let _permit = semaphore
                     .acquire()
@@ -541,8 +566,60 @@ async fn dispatch_tasks_add(
                     .await
                     .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
                     .with_filename(&filename)?;
-
+                let elapsed = start.elapsed();
                 pb.inc(1);
+                let mut total = total_downloaded.lock().await;
+                *total += package_record.size.unwrap_or_default() as u64;
+
+                // Record and compute average speed using the inline tracker state.
+                {
+                    let mut guard = speed_tracker.lock().await;
+                    let window = guard.1.clone();
+                    {
+                        guard.2 = *total as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64();
+                        let history = &mut guard.0;
+                        let now = Instant::now();
+                        let bytes = package_record.size.unwrap_or_default() as u64;
+                        history.push_back((now, bytes));
+
+                        // remove entries older than the window
+                        while let Some((time, _)) = history.front() {
+                            if now.duration_since(*time) > window {
+                                history.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // compute avg speed from history
+                let avg_speed = {
+                    let guard = speed_tracker.lock().await;
+                    let history = &guard.0;
+                    let overall_avg_speed = guard.2;
+                    if history.is_empty() {
+                        0.0
+                    } else if history.len() == 1 {
+                        overall_avg_speed
+                    } else {
+                        let total_bytes: u64 = history.iter().map(|(_, bytes)| *bytes).sum();
+                        let duration = history
+                            .back()
+                            .unwrap()
+                            .0
+                            .duration_since(history.front().unwrap().0);
+                        (total_bytes as f64 / 1024.0 / 1024.0) / duration.as_secs_f64()
+                    }
+                };
+
+                let msg = format!(
+                    " {:.2} / {:.2} | {:.2} MB/s",
+                    HumanBytes(*total),
+                    HumanBytes(total_size_bytes),
+                    avg_speed,
+                );
+                pb_speed.set_message(msg);
                 let res: Result<(), MirrorPackageError> = Ok(());
                 res
             };
