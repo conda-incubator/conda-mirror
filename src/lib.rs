@@ -1,5 +1,5 @@
 use futures::{StreamExt, stream::FuturesOrdered};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
@@ -16,11 +16,11 @@ use rattler_networking::{
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, reqwest::Client};
 use reqwest_retry::RetryTransientMiddleware;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env::current_dir,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, sync::Semaphore};
 
@@ -345,30 +345,56 @@ async fn dispatch_tasks_add(
 ) -> miette::Result<()> {
     if !packages_to_add.is_empty() {
         let mut tasks = FuturesOrdered::new();
-
-        let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
-        let sty = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-");
-        pb.set_style(sty);
         let packages_to_add_len = packages_to_add.len();
 
-        let pb = pb.clone();
+        // Progress bar for files
+        let pb_files = Arc::new(progress.add(ProgressBar::new(packages_to_add_len as u64)));
+        pb_files.set_style(
+            ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+
+        // Progress bar for overall speed/time tracking
+        let pb_speed = Arc::new(progress.add(ProgressBar::new_spinner()));
+        pb_speed.set_style(
+            ProgressStyle::with_template("{spinner:.green} | {elapsed_precise} | {msg}").unwrap(),
+        );
+        pb_speed.enable_steady_tick(std::time::Duration::from_millis(150));
+
+        let total_downloaded = Arc::new(tokio::sync::Mutex::new(0u64));
+        let total_size_bytes = packages_to_add
+            .values()
+            .map(|p| p.size.unwrap_or(0))
+            .sum::<u64>();
+
         let filenames = packages_to_add.keys().cloned().collect::<Vec<_>>();
+
+        // Shared speed tracking state: (history, window, overall_avg_speed)
+        let speed_tracker = Arc::new(tokio::sync::Mutex::new((
+            VecDeque::<(Instant, u64)>::new(), //stores all records which were completed in last 20 seconds
+            Duration::from_secs(20),
+            0.0f64, //overall average speed
+        )));
+
+        let start = std::time::Instant::now();
+
         for (filename, package_record) in packages_to_add {
-            let pb = pb.clone();
+            let pb_files = pb_files.clone();
+            let pb_speed = pb_speed.clone();
             let semaphore = semaphore.clone();
             let config = config.clone();
             let client = client.clone();
             let op = op.clone();
+            let total_downloaded = total_downloaded.clone();
+            let speed_tracker = speed_tracker.clone();
             let task = async move {
                 let _permit = semaphore
                     .acquire()
                     .await
                     .expect("Semaphore was unexpectedly closed");
-                pb.set_message(format!(
+
+                pb_files.set_message(format!(
                     "Mirroring {} {}",
                     subdir.as_str(),
                     console::style(&filename).dim()
@@ -409,10 +435,67 @@ async fn dispatch_tasks_add(
                     .await
                     .into_diagnostic()?;
 
-                pb.inc(1);
-                let res: miette::Result<()> = Ok(());
-                res
+                let elapsed = start.elapsed();
+
+                // Update counters
+                pb_files.inc(1);
+
+                let mut total = total_downloaded.lock().await;
+                *total += package_record.size.unwrap_or_default() as u64;
+
+                // Record and compute average speed using the inline tracker state.
+                {
+                    let mut guard = speed_tracker.lock().await;
+                    let window = guard.1.clone();
+                    {
+                        guard.2 = *total as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64();
+                        let history = &mut guard.0;
+                        let now = Instant::now();
+                        let bytes = package_record.size.unwrap_or_default() as u64;
+                        history.push_back((now, bytes));
+
+                        // remove entries older than the window
+                        while let Some((time, _)) = history.front() {
+                            if now.duration_since(*time) > window {
+                                history.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // compute avg speed from history
+                let avg_speed = {
+                    let guard = speed_tracker.lock().await;
+                    let history = &guard.0;
+                    let overall_avg_speed = guard.2;
+                    if history.is_empty() {
+                        0.0
+                    } else if history.len() == 1 {
+                        overall_avg_speed
+                    } else {
+                        let total_bytes: u64 = history.iter().map(|(_, bytes)| *bytes).sum();
+                        let duration = history
+                            .back()
+                            .unwrap()
+                            .0
+                            .duration_since(history.front().unwrap().0);
+                        (total_bytes as f64 / 1024.0 / 1024.0) / duration.as_secs_f64()
+                    }
+                };
+
+                let msg = format!(
+                    " {:.2} / {:.2} | {:.2} MB/s",
+                    HumanBytes(*total),
+                    HumanBytes(total_size_bytes),
+                    avg_speed,
+                );
+                pb_speed.set_message(msg);
+
+                Ok::<_, miette::Report>(())
             };
+
             tasks.push_back(tokio::spawn(task));
         }
 
@@ -429,12 +512,12 @@ async fn dispatch_tasks_add(
                         filenames[counter],
                         e
                     );
-                    pb.inc(1);
+                    pb_files.inc(1);
                     failed.push(e);
                 }
                 Err(join_err) => {
                     tracing::error!("Task panicked: {}", join_err);
-                    pb.abandon_with_message(format!(
+                    pb_files.abandon_with_message(format!(
                         "{} {}",
                         console::style("Failed to add packages in").red(),
                         console::style(subdir.as_str()).dim()
@@ -450,13 +533,13 @@ async fn dispatch_tasks_add(
             subdir.as_str()
         );
         if failed.is_empty() {
-            pb.finish_with_message(format!(
+            pb_files.finish_with_message(format!(
                 "{} {}",
                 console::style("Finished adding packages in").green(),
                 console::style(subdir.as_str()).bold()
             ));
         } else {
-            pb.abandon_with_message(format!(
+            pb_files.abandon_with_message(format!(
                 "{} {} with {} failures",
                 console::style("Finished adding packages in").red(),
                 console::style(subdir.as_str()).bold(),
@@ -464,6 +547,13 @@ async fn dispatch_tasks_add(
             ));
             return Err(miette::miette!("Failed to add {} packages", failed.len()));
         }
+
+        pb_speed.finish_with_message(format!(
+            "Completed mirroring {} ({} succeeded, {} failed)",
+            console::style(subdir.as_str()).bold(),
+            packages_to_add_len - failed.len(),
+            failed.len()
+        ));
     }
     Ok(())
 }
