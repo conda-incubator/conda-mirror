@@ -451,7 +451,7 @@ async fn dispatch_tasks_add(
 
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
         let sty = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+            "[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}",
         )
         .unwrap()
         .progress_chars("##-");
@@ -569,17 +569,17 @@ async fn dispatch_tasks_add(
                 let elapsed = start.elapsed();
                 pb.inc(1);
                 let mut total = total_downloaded.lock().await;
-                *total += package_record.size.unwrap_or_default() as u64;
+                *total += package_record.size.unwrap_or_default();
 
                 // Record and compute average speed using the inline tracker state.
                 {
                     let mut guard = speed_tracker.lock().await;
-                    let window = guard.1.clone();
+                    let window = guard.1;
                     {
                         guard.2 = *total as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64();
                         let history = &mut guard.0;
                         let now = Instant::now();
-                        let bytes = package_record.size.unwrap_or_default() as u64;
+                        let bytes = package_record.size.unwrap_or_default();
                         history.push_back((now, bytes));
 
                         // remove entries older than the window
