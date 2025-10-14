@@ -41,6 +41,48 @@ enum OpenDALConfigurator {
     S3(opendal::services::S3Config),
 }
 
+#[derive(Debug)]
+struct SpeedTracker {
+    history: VecDeque<(Instant, u64)>,
+    window: Duration,
+    window_bytes: u64,
+}
+
+impl SpeedTracker {
+    fn new(window_secs: u64) -> Self {
+        Self {
+            history: VecDeque::new(),
+            window: Duration::from_secs(window_secs),
+            window_bytes: 0,
+        }
+    }
+
+    fn record(&mut self, bytes: u64, start_time: Instant) {
+        self.history.push_back((start_time, bytes));
+        self.window_bytes += bytes;
+
+        // remove entries older than the window
+        while let Some((time, bytes)) = self.history.front() {
+            if start_time.duration_since(*time) > self.window {
+                self.window_bytes -= bytes;
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn avg_speed(&self) -> f64 {
+        if self.history.is_empty() {
+            return 0.0;
+        }
+
+        let duration = Instant::now().duration_since(self.history.front().unwrap().0);
+
+        (self.window_bytes as f64 / (1 << 20) as f64) / duration.as_secs_f64() //speed in MB/s
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MirrorPackageErrorKind {
     #[error("failed to open file {0}: {1}")]
@@ -450,11 +492,9 @@ async fn dispatch_tasks_add(
         let mut tasks = FuturesUnordered::new();
 
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
-        let sty = ProgressStyle::with_template(
-            "[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-");
+        let sty = ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-");
         pb.set_style(sty);
         let packages_to_add_len = packages_to_add.len();
 
@@ -472,13 +512,7 @@ async fn dispatch_tasks_add(
             .sum::<u64>();
 
         // Shared speed tracking state: (history, window, overall_avg_speed)
-        let speed_tracker = Arc::new(tokio::sync::Mutex::new((
-            VecDeque::<(Instant, u64)>::new(), //stores all records which were completed in last 20 seconds
-            Duration::from_secs(20),
-            0.0f64, //overall average speed
-        )));
-
-        let start = std::time::Instant::now();
+        let speed_tracker = Arc::new(tokio::sync::Mutex::new(SpeedTracker::new(20)));
 
         let pb = pb.clone();
         for (filename, package_record) in packages_to_add {
@@ -507,6 +541,7 @@ async fn dispatch_tasks_add(
                     .map_err(MirrorPackageErrorKind::ParseUrl)
                     .with_filename(&filename)?;
                 let mut buf = Vec::new();
+                let start = Instant::now();
                 if package_url.scheme() == "file" {
                     let path = package_url.to_file_path().unwrap();
                     let mut file = tokio::fs::File::open(&path)
@@ -566,52 +601,15 @@ async fn dispatch_tasks_add(
                     .await
                     .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
                     .with_filename(&filename)?;
-                let elapsed = start.elapsed();
                 pb.inc(1);
                 let mut total = total_downloaded.lock().await;
                 *total += package_record.size.unwrap_or_default();
 
-                // Record and compute average speed using the inline tracker state.
-                {
-                    let mut guard = speed_tracker.lock().await;
-                    let window = guard.1;
-                    {
-                        guard.2 = *total as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64();
-                        let history = &mut guard.0;
-                        let now = Instant::now();
-                        let bytes = package_record.size.unwrap_or_default();
-                        history.push_back((now, bytes));
+                let bytes = package_record.size.unwrap_or_default();
 
-                        // remove entries older than the window
-                        while let Some((time, _)) = history.front() {
-                            if now.duration_since(*time) > window {
-                                history.pop_front();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // compute avg speed from history
-                let avg_speed = {
-                    let guard = speed_tracker.lock().await;
-                    let history = &guard.0;
-                    let overall_avg_speed = guard.2;
-                    if history.is_empty() {
-                        0.0
-                    } else if history.len() == 1 {
-                        overall_avg_speed
-                    } else {
-                        let total_bytes: u64 = history.iter().map(|(_, bytes)| *bytes).sum();
-                        let duration = history
-                            .back()
-                            .unwrap()
-                            .0
-                            .duration_since(history.front().unwrap().0);
-                        (total_bytes as f64 / 1024.0 / 1024.0) / duration.as_secs_f64()
-                    }
-                };
+                let mut tracker = speed_tracker.lock().await;
+                tracker.record(bytes, start);
+                let avg_speed = tracker.avg_speed();
 
                 let msg = format!(
                     " {:.2} / {:.2} | {:.2} MB/s",
