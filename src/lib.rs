@@ -503,6 +503,7 @@ async fn dispatch_tasks_delete(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_add(
     packages_to_add: HashMap<String, PackageRecord>,
