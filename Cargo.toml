@@ -29,6 +29,7 @@ futures = "0.3.31"
 glob = "0.3.3"
 indicatif = "0.18.0"
 miette = { version = "7.6.0", features = ["fancy"] }
+number_prefix = "0.4.0"
 opendal = { version = "0.54.0", features = ["services-s3", "services-fs"] }
 rattler_conda_types = "0.40.0"
 rattler_digest = "1.1.5"
