@@ -1,4 +1,4 @@
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
@@ -44,29 +44,55 @@ enum OpenDALConfigurator {
 }
 
 #[derive(Debug)]
+struct SpeedTrackerBar {
+    progress_bar: Arc<ProgressBar>,
+    speed_tracker: Arc<Mutex<SpeedTracker>>,
+    total_bytes: Arc<Mutex<Option<u64>>>,
+    downloaded_bytes: Arc<Mutex<u64>>,
+}
+
+impl SpeedTrackerBar {
+    fn new(
+        progress_bar: ProgressBar,
+        speed_tracker: SpeedTracker,
+        total_size_bytes: Option<u64>,
+        total_downloaded_bytes: u64,
+    ) -> Self {
+        Self {
+            progress_bar: Arc::new(progress_bar),
+            speed_tracker: Arc::new(Mutex::new(speed_tracker)),
+            total_bytes: Arc::new(Mutex::new(total_size_bytes)),
+            downloaded_bytes: Arc::new(Mutex::new(total_downloaded_bytes)),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct SpeedTracker {
     history: VecDeque<(Instant, u64)>,
     window: Duration,
-    window_bytes: u64,
+    window_bits: u64,
 }
 
 impl SpeedTracker {
-    fn new(window_secs: u64) -> Self {
+    fn new(window: Duration) -> Self {
         Self {
             history: VecDeque::new(),
-            window: Duration::from_secs(window_secs),
-            window_bytes: 0,
+            window,
+            window_bits: 0,
         }
     }
 
-    fn record(&mut self, bytes: u64, start_time: Instant) {
-        self.history.push_back((start_time, bytes));
-        self.window_bytes += bytes;
+    fn record(&mut self, bytes: u64) {
+        let bits = bytes * 8;
+        let now = Instant::now();
+        self.history.push_back((now, bits));
+        self.window_bits += bits;
 
         // remove entries older than the window
-        while let Some((time, bytes)) = self.history.front() {
-            if start_time.duration_since(*time) > self.window {
-                self.window_bytes -= bytes;
+        while let Some((time, bits)) = self.history.front() {
+            if now.duration_since(*time) > self.window {
+                self.window_bits -= bits;
                 self.history.pop_front();
             } else {
                 break;
@@ -75,13 +101,17 @@ impl SpeedTracker {
     }
 
     fn avg_speed(&self) -> f64 {
-        if self.history.is_empty() {
-            return 0.0;
-        }
-
-        let duration = Instant::now().duration_since(self.history.front().unwrap().0);
-
-        self.window_bytes as f64 / duration.as_secs_f64()
+        self.history
+            .front()
+            .map(|entry| {
+                let elapsed = Instant::now().duration_since(entry.0).as_secs_f64();
+                if elapsed > 0.0 {
+                    self.window_bits as f64 / elapsed
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0)
     }
 }
 
@@ -90,7 +120,7 @@ pub struct HumanBitsPerSecond(f64);
 impl fmt::Display for HumanBitsPerSecond {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match NumberPrefix::decimal(self.0) {
-            NumberPrefix::Standalone(number) => write!(f, "{number:.0} b/s"),
+            NumberPrefix::Standalone(number) => write!(f, "{number:.2} b/s"),
             NumberPrefix::Prefixed(prefix, number) => write!(f, "{number:.2} {prefix}b/s"),
         }
     }
@@ -111,6 +141,8 @@ pub enum MirrorPackageErrorKind {
         expected: Sha256Hash,
         actual: Sha256Hash,
     },
+    #[error("invalid size: expected {expected} bytes, got {actual} bytes")]
+    InvalidSize { expected: u64, actual: u64 },
     #[error("failed upload to {0}: {1}")]
     Upload(String, #[source] opendal::Error),
     #[error("failed to delete {0}: {1}")]
@@ -292,12 +324,23 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
     let mut tasks = FuturesUnordered::new();
 
     // Progress bar for speed/time tracking
-    let speed_tracker_progress_bar = Arc::new(multi_progress.add(ProgressBar::new_spinner()));
-    speed_tracker_progress_bar.set_style(
+    let speed_bar = multi_progress.add(ProgressBar::new_spinner());
+    speed_bar.set_style(
         ProgressStyle::with_template("{spinner:.green} | {elapsed_precise} | {msg}").unwrap(),
     );
-    speed_tracker_progress_bar.enable_steady_tick(std::time::Duration::from_millis(150));
-    speed_tracker_progress_bar.set_message("Setting things up...".to_string());
+    speed_bar.enable_steady_tick(std::time::Duration::from_millis(150));
+
+    let speed_tracker = SpeedTracker::new(Duration::from_secs(20));
+    let total_bytes = Some(0u64);
+    let downloaded_bytes = 0u64;
+
+    //using struct
+    let speed_tracker_bar = Arc::new(SpeedTrackerBar::new(
+        speed_bar,
+        speed_tracker,
+        total_bytes,
+        downloaded_bytes,
+    ));
 
     for subdir in subdirs.clone() {
         let config = config.clone();
@@ -305,7 +348,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         let multi_progress = multi_progress.clone();
         let semaphore = semaphore.clone();
         let opendal_config = opendal_config.clone();
-        let speed_tracker_progress_bar = speed_tracker_progress_bar.clone();
+        let speed_tracker_bar = speed_tracker_bar.clone();
         let task = async move {
             match &opendal_config {
                 // todo: call mirror_subdir with configurator instead
@@ -317,7 +360,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                         subdir,
                         multi_progress.clone(),
                         semaphore.clone(),
-                        speed_tracker_progress_bar.clone(),
+                        speed_tracker_bar.clone(),
                     )
                     .await // TODO: remove async move and .await
                 }
@@ -329,7 +372,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                         subdir,
                         multi_progress.clone(),
                         semaphore.clone(),
-                        speed_tracker_progress_bar.clone(),
+                        speed_tracker_bar.clone(),
                     )
                     .await
                 }
@@ -513,7 +556,7 @@ async fn dispatch_tasks_add(
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
-    speed_tracker_progress_bar: Arc<ProgressBar>,
+    speed_tracker_bar: Arc<SpeedTrackerBar>,
 ) -> Result<(), MirrorSubdirErrorKind> {
     if !packages_to_add.is_empty() {
         let mut tasks = FuturesUnordered::new();
@@ -526,25 +569,14 @@ async fn dispatch_tasks_add(
 
         let packages_to_add_len = packages_to_add.len();
 
-        let total_downloaded = Arc::new(tokio::sync::Mutex::new(0u64));
-        let total_size_bytes = packages_to_add
-            .values()
-            .map(|p| p.size.unwrap_or(0))
-            .sum::<u64>();
-
-        // Shared speed tracking state: (history, window, overall_avg_speed)
-        let speed_tracker = Arc::new(tokio::sync::Mutex::new(SpeedTracker::new(20)));
-
         let pb = pb.clone();
         for (filename, package_record) in packages_to_add {
             let pb = pb.clone();
-            let speed_tracker_progress_bar = speed_tracker_progress_bar.clone();
+            let speed_tracker_bar = speed_tracker_bar.clone();
             let semaphore = semaphore.clone();
             let config = config.clone();
             let client = client.clone();
             let op = op.clone();
-            let total_downloaded = total_downloaded.clone();
-            let speed_tracker = speed_tracker.clone();
             let task = async move {
                 let _permit = semaphore
                     .acquire()
@@ -563,7 +595,6 @@ async fn dispatch_tasks_add(
                     .map_err(MirrorPackageErrorKind::ParseUrl)
                     .with_filename(&filename)?;
                 let mut buf = Vec::new();
-                let start = Instant::now();
                 if package_url.scheme() == "file" {
                     let path = package_url.to_file_path().unwrap();
                     let mut file = tokio::fs::File::open(&path)
@@ -619,16 +650,24 @@ async fn dispatch_tasks_add(
                     );
                 }
 
-                // Verify size from repodata when available (non-zero). Use actual downloaded bytes
+                // Verify size from repodata when available.
                 if let Some(expected_size) = package_record.size
-                    && (expected_size > 0 && expected_size != actual_bytes)
+                    && expected_size != actual_bytes
                 {
-                    tracing::warn!(
-                        "Size mismatch for {} (expected {}, got {}) — continuing",
+                    tracing::error!(
+                        "Size mismatch for Filename: {}, (expected {}, got {}), Subdir:{}",
                         filename,
                         expected_size,
-                        actual_bytes
+                        actual_bytes,
+                        subdir
                     );
+                    return Err(MirrorPackageError {
+                        filename,
+                        source: Box::new(MirrorPackageErrorKind::InvalidSize {
+                            expected: expected_size,
+                            actual: actual_bytes,
+                        }),
+                    });
                 }
 
                 // use opendal to upload the package
@@ -639,21 +678,35 @@ async fn dispatch_tasks_add(
                     .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
                     .with_filename(&filename)?;
                 pb.inc(1);
-                let mut total = total_downloaded.lock().await;
-                *total += actual_bytes;
-                let bytes = actual_bytes;
 
-                let mut tracker = speed_tracker.lock().await;
-                tracker.record(bytes, start);
-                let avg_speed = tracker.avg_speed();
+                // Update the total downloaded bytes
+                let mut downloaded_bytes_guard = speed_tracker_bar.downloaded_bytes.lock().await;
+                *downloaded_bytes_guard += actual_bytes;
 
-                let msg = format!(
-                    " {:.2} / {:.2} | {}",
-                    HumanBytes(*total),
-                    HumanBytes(total_size_bytes),
-                    HumanBitsPerSecond(avg_speed),
-                );
-                speed_tracker_progress_bar.set_message(msg);
+                // Record current download in the speed tracker
+                let mut speed_monitor = speed_tracker_bar.speed_tracker.lock().await;
+                speed_monitor.record(actual_bytes);
+
+                let avg_speed = speed_monitor.avg_speed();
+
+                let msg = if let Some(total_bytes) = *speed_tracker_bar.total_bytes.lock().await {
+                    // If the total size of the download is known
+                    format!(
+                        " {:.2} ↕ / {:.2} | {}",
+                        HumanBytes(*downloaded_bytes_guard),
+                        HumanBytes(total_bytes),
+                        HumanBitsPerSecond(avg_speed),
+                    )
+                } else {
+                    // If total size is unknown, display only downloaded bytes and speed
+                    format!(
+                        " {:.2} ↕ | {}",
+                        HumanBytes(*downloaded_bytes_guard),
+                        HumanBitsPerSecond(avg_speed),
+                    )
+                };
+
+                speed_tracker_bar.progress_bar.set_message(msg);
                 let res: Result<(), MirrorPackageError> = Ok(());
                 res
             };
@@ -718,7 +771,7 @@ async fn mirror_subdir<T: Configurator>(
     subdir: Platform,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
-    speed_tracker_progress_bar: Arc<ProgressBar>,
+    speed_tracker_bar: Arc<SpeedTrackerBar>,
 ) -> Result<(), MirrorSubdirError> {
     let repodata_url = config.repodata_url(subdir);
     // TODO: implement spinner for repodata fetching, use rattler-repodata-gateway for sharded repodata?
@@ -787,9 +840,24 @@ async fn mirror_subdir<T: Configurator>(
         .cloned()
         .collect::<Vec<_>>();
     let mut packages_to_add = HashMap::new();
+    let mut subdir_size_to_add = Some(0);
     for (filename, package) in packages_to_mirror.clone() {
         if !available_packages.contains(&filename) {
+            if let Some(size) = package.size {
+                if let Some(current) = subdir_size_to_add {
+                    subdir_size_to_add = Some(current + size);
+                }
+            } else {
+                subdir_size_to_add = None;
+            }
             packages_to_add.insert(filename, package);
+        }
+    }
+
+    if let Some(add_size) = subdir_size_to_add {
+        let mut total_bytes_guard = speed_tracker_bar.total_bytes.lock().await;
+        if let Some(current_total) = total_bytes_guard.as_mut() {
+            *current_total += add_size;
         }
     }
 
@@ -817,7 +885,7 @@ async fn mirror_subdir<T: Configurator>(
         progress.clone(),
         semaphore.clone(),
         op.clone(),
-        speed_tracker_progress_bar.clone(),
+        speed_tracker_bar.clone(),
     )
     .await
     .with_subdir(subdir)?;
