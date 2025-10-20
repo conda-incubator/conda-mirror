@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "conda-mirror"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "anyhow",
  "clap",

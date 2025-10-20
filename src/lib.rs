@@ -657,7 +657,7 @@ async fn dispatch_tasks_add(
                 let msg = if let Some(total_bytes) = speed_bar_guard.total_bytes {
                     // If the total size of the download is known
                     format!(
-                        " ↕ {:.2} / {:.2} | {}",
+                        "↕ {:.2} / {:.2} | {}",
                         HumanBytes(speed_bar_guard.downloaded_bytes),
                         HumanBytes(total_bytes),
                         HumanBitsPerSecond(avg_speed),
@@ -665,7 +665,7 @@ async fn dispatch_tasks_add(
                 } else {
                     // If total size is unknown, display only downloaded bytes and speed
                     format!(
-                        " ↕ {:.2} | {}",
+                        "↕ {:.2} | {}",
                         HumanBytes(speed_bar_guard.downloaded_bytes),
                         HumanBitsPerSecond(avg_speed),
                     )
