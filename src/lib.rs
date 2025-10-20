@@ -432,11 +432,9 @@ async fn dispatch_tasks_delete(
     let mut tasks = FuturesUnordered::new();
     if !packages_to_delete.is_empty() {
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_delete.len() as u64)));
-        let sty = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.red/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-");
+        let sty = ProgressStyle::with_template("{bar:40.red/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-");
         pb.set_style(sty);
         let packages_to_delete_len = packages_to_delete.len();
 
