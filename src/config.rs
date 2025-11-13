@@ -122,34 +122,6 @@ impl std::fmt::Debug for S3Credentials {
 
 /* -------------------------------------------- YAML ------------------------------------------- */
 
-// impl<'de> Deserialize<'de> for GlobPattern {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: Deserializer<'de>,
-//     {
-//         let s = String::deserialize(deserializer)?;
-//         glob::Pattern::from_str(&s)
-//             .map(GlobPattern)
-//             .map_err(serde::de::Error::custom)
-//     }
-// }
-
-// #[derive(Debug, Clone)]
-// #[repr(transparent)]
-// pub struct NamelessMatchSpecWrapper(NamelessMatchSpec);
-
-// impl<'de> Deserialize<'de> for NamelessMatchSpecWrapper {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: Deserializer<'de>,
-//     {
-//         let s = String::deserialize(deserializer)?;
-//         let wrapper = NamelessMatchSpecWrapper(s.parse().map_err(serde::de::Error::custom)?);
-//         tracing::trace!("Deserialized NamelessMatchSpec: {wrapper:?}");
-//         Ok(wrapper)
-//     }
-// }
-
 #[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct MatchSpecWrapper(pub MatchSpec);
