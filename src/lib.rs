@@ -1,28 +1,37 @@
-use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
+use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
 use rattler_digest::{Sha256Hash, compute_bytes_digest};
-use rattler_index::write_repodata;
+use rattler_index::{RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, reqwest::Client};
+use reqwest::StatusCode;
+use reqwest_middleware::{
+    ClientBuilder, ClientWithMiddleware,
+    reqwest::{self, Client},
+};
 use reqwest_retry::RetryTransientMiddleware;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env::current_dir,
+    fmt,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{io::AsyncReadExt, sync::Semaphore};
+use thiserror::Error;
+use tokio::{io::AsyncReadExt, sync::Semaphore, task::JoinError};
+use tracing::info;
+use url::Url;
 
 pub mod config;
 use config::{CondaMirrorConfig, MirrorMode};
@@ -32,6 +41,173 @@ use config::{CondaMirrorConfig, MirrorMode};
 enum OpenDALConfigurator {
     File(opendal::services::FsConfig),
     S3(opendal::services::S3Config),
+}
+
+#[derive(Debug)]
+struct SpeedTrackerBar {
+    progress_bar: ProgressBar,
+    total_bytes: Option<u64>,
+    downloaded_bytes: u64,
+    history: VecDeque<(Instant, u64)>,
+    window: Duration,
+    window_bits: u64,
+}
+
+impl SpeedTrackerBar {
+    fn new(progress_bar: ProgressBar, window: Duration) -> Self {
+        Self {
+            progress_bar,
+            total_bytes: Some(0u64),
+            downloaded_bytes: 0u64,
+            history: VecDeque::new(),
+            window,
+            window_bits: 0u64,
+        }
+    }
+
+    fn record(&mut self, bytes: u64) {
+        let bits = bytes * 8;
+        let now = Instant::now();
+        self.history.push_back((now, bits));
+        self.window_bits += bits;
+
+        // remove entries older than the window
+        while let Some((time, bits)) = self.history.front() {
+            if now.duration_since(*time) > self.window {
+                self.window_bits -= bits;
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn avg_speed(&self) -> f64 {
+        self.history
+            .front()
+            .map(|entry| {
+                let elapsed = Instant::now().duration_since(entry.0).as_secs_f64();
+                if elapsed > 0.0 {
+                    self.window_bits as f64 / elapsed
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0)
+    }
+}
+
+pub struct HumanBitsPerSecond(f64);
+
+impl fmt::Display for HumanBitsPerSecond {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match NumberPrefix::decimal(self.0) {
+            NumberPrefix::Standalone(number) => write!(f, "{number:.2} b/s"),
+            NumberPrefix::Prefixed(prefix, number) => write!(f, "{number:.2} {prefix}b/s"),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum MirrorPackageErrorKind {
+    #[error("failed to open file {0}: {1}")]
+    FileOpen(PathBuf, #[source] std::io::Error),
+    #[error("failed to read file {0}: {1}")]
+    FileRead(PathBuf, #[source] std::io::Error),
+    #[error("failed to send request to {0}: {1}")]
+    SendRequest(Url, #[source] reqwest_middleware::Error),
+    #[error("failed to get response from {0}: {1}")]
+    GetResponse(Url, #[source] reqwest::Error),
+    #[error("invalid digest: {expected:x} (expected) != {actual:x} (actual)")]
+    InvalidDigest {
+        expected: Sha256Hash,
+        actual: Sha256Hash,
+    },
+    #[error("invalid size: expected {expected} bytes, got {actual} bytes")]
+    InvalidSize { expected: u64, actual: u64 },
+    #[error("failed upload to {0}: {1}")]
+    Upload(String, #[source] opendal::Error),
+    #[error("failed to delete {0}: {1}")]
+    Delete(String, #[source] opendal::Error),
+    #[error("failed to parse URL: {0}")]
+    ParseUrl(#[source] url::ParseError),
+    #[error("error while fetching {url}: got status {status}")]
+    UnsuccessfulFetch { status: StatusCode, url: Url },
+}
+
+#[derive(Debug, Error)]
+#[error("error downloading {filename}: {source}")]
+pub struct MirrorPackageError {
+    pub filename: String,
+    #[source]
+    pub source: Box<MirrorPackageErrorKind>,
+}
+
+trait WithFileContext<T> {
+    fn with_filename(self, filename: &str) -> Result<T, MirrorPackageError>;
+}
+
+impl<T, E> WithFileContext<T> for Result<T, E>
+where
+    MirrorPackageErrorKind: From<E>,
+{
+    fn with_filename(self, filename: &str) -> Result<T, MirrorPackageError> {
+        self.map_err(|err| MirrorPackageError {
+            filename: filename.to_string(),
+            source: Box::new(err.into()),
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum MirrorSubdirErrorKind {
+    #[error("failed to read repodata {0}: {1}")]
+    FailedToReadRepodata(PathBuf, #[source] std::io::Error),
+    #[error("failed to send request to {0}: {1}")]
+    SendRequest(Url, #[source] reqwest_middleware::Error),
+    #[error("error while fetching {url}: got status {status}")]
+    UnsuccessfulFetch { status: StatusCode, url: Url },
+    #[error("failed to get response text for {0}: {1}")]
+    FailedToGetResponseText(Url, #[source] reqwest::Error),
+    #[error("failed to parse repodata: {0}")]
+    FailedToParseRepodata(#[source] serde_json::Error),
+    #[error("failed to construct OpenDAL operator: {0}")]
+    FailedToConstructOpenDalOperator(#[source] opendal::Error),
+    #[error("failed to query available packages: {0}")]
+    FailedToQueryAvailablePackages(#[source] opendal::Error),
+    #[error("failed to delete {0} packages")]
+    FailedToDeletePackages(usize),
+    #[error("failed to add {0} packages")]
+    FailedToAddPackages(usize),
+    #[error("task panicked: {0}")]
+    JoinError(#[from] JoinError),
+    #[error("failed to write repodata: {0}")]
+    // https://github.com/conda/rattler/issues/1726
+    WriteRepodata(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+#[error("error mirroring subdir {subdir}: {source}")]
+pub struct MirrorSubdirError {
+    pub subdir: Platform,
+    #[source]
+    pub source: MirrorSubdirErrorKind,
+}
+
+trait WithSubdirContext<T> {
+    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError>;
+}
+
+impl<T, E> WithSubdirContext<T> for Result<T, E>
+where
+    MirrorSubdirErrorKind: From<E>,
+{
+    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError> {
+        self.map_err(|err| MirrorSubdirError {
+            subdir,
+            source: err.into(),
+        })
+    }
 }
 
 pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
@@ -123,13 +299,30 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
     let multi_progress = Arc::new(MultiProgress::new());
     let semaphore = Arc::new(Semaphore::new(max_parallel));
 
+    if config.no_progress {
+        multi_progress.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+
     let mut tasks = FuturesUnordered::new();
-    for subdir in subdirs {
+
+    // Progress bar for speed/time tracking
+    let speed_bar = multi_progress.add(ProgressBar::new_spinner());
+    speed_bar.set_style(
+        ProgressStyle::with_template("{spinner:.green} | {elapsed_precise} | {msg}").unwrap(),
+    );
+    speed_bar.enable_steady_tick(std::time::Duration::from_millis(150));
+
+    let window_duration = Duration::from_secs(20);
+
+    let speed_tracker_bar = Arc::new(Mutex::new(SpeedTrackerBar::new(speed_bar, window_duration)));
+
+    for subdir in subdirs.clone() {
         let config = config.clone();
         let client = client.clone();
         let multi_progress = multi_progress.clone();
         let semaphore = semaphore.clone();
         let opendal_config = opendal_config.clone();
+        let speed_tracker_bar = speed_tracker_bar.clone();
         let task = async move {
             match &opendal_config {
                 // todo: call mirror_subdir with configurator instead
@@ -141,6 +334,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                         subdir,
                         multi_progress.clone(),
                         semaphore.clone(),
+                        speed_tracker_bar.clone(),
                     )
                     .await // TODO: remove async move and .await
                 }
@@ -152,6 +346,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                         subdir,
                         multi_progress.clone(),
                         semaphore.clone(),
+                        speed_tracker_bar.clone(),
                     )
                     .await
                 }
@@ -160,23 +355,38 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         tasks.push(tokio::spawn(task));
     }
 
+    let mut failed = Vec::new();
     while let Some(join_result) = tasks.next().await {
         match join_result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::error!("Failed to process subdir: {}", e);
-                tasks.clear();
-                return Err(e);
+                tracing::error!("Failed to process subdir {}: {}", e.subdir, e.source);
+                failed.push(e);
             }
             Err(join_err) => {
-                tracing::error!("Task panicked: {}", join_err);
                 tasks.clear();
+                tracing::error!("Task panicked: {}", join_err);
                 return Err(miette::miette!("Task panicked: {}", join_err));
             }
         }
     }
 
-    eprintln!("✅ Mirroring completed");
+    if failed.is_empty() {
+        eprintln!("✅ All subdirs mirrored successfully");
+    } else {
+        eprintln!(
+            "❌ Mirroring completed. {} subdirs had failures.",
+            failed.len()
+        );
+        for error in &failed {
+            eprintln!(" - {}: {}", error.subdir, error.source);
+        }
+        return Err(miette::miette!(
+            "Mirroring failed for {} subdirs",
+            failed.len()
+        ));
+    }
+
     Ok(())
 }
 
@@ -218,20 +428,18 @@ async fn dispatch_tasks_delete(
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
-) -> miette::Result<()> {
+) -> Result<(), MirrorSubdirErrorKind> {
     let mut tasks = FuturesUnordered::new();
     if !packages_to_delete.is_empty() {
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_delete.len() as u64)));
-        let sty = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.red/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-");
+        let sty = ProgressStyle::with_template("{bar:40.red/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-");
         pb.set_style(sty);
         let packages_to_delete_len = packages_to_delete.len();
 
         let pb = pb.clone();
-        for filename in packages_to_delete {
+        for filename in packages_to_delete.clone() {
             let pb = pb.clone();
             let semaphore = semaphore.clone();
             let op = op.clone();
@@ -249,55 +457,68 @@ async fn dispatch_tasks_delete(
                 let destination_path = format!("{}/{}", subdir.as_str(), filename);
                 op.delete(destination_path.as_str())
                     .await
-                    .into_diagnostic()?;
+                    .map_err(|e| MirrorPackageErrorKind::Delete(destination_path, e))
+                    .with_filename(&filename)?;
 
                 pb.inc(1);
-                let res: miette::Result<()> = Ok(());
+                let res: Result<(), MirrorPackageError> = Ok(());
                 res
             };
             tasks.push(tokio::spawn(task));
         }
 
-        let mut results = Vec::new();
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
         while let Some(join_result) = tasks.next().await {
             match join_result {
-                Ok(Ok(result)) => results.push(result),
+                Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tasks.clear();
-                    tracing::error!("Failed to delete package: {}", e);
-                    pb.abandon_with_message(format!(
-                        "{} {}",
-                        console::style("Failed to delete packages in").red(),
-                        console::style(subdir.as_str()).dim()
-                    ));
-                    return Err(e);
+                    tracing::error!(
+                        "Failed to delete package {subdir}/{}: {}",
+                        e.filename,
+                        e.source,
+                    );
+                    failed.push(e);
+                    pb.inc(1);
                 }
                 Err(join_err) => {
-                    tasks.clear();
                     tracing::error!("Task panicked: {}", join_err);
+                    tasks.clear();
                     pb.abandon_with_message(format!(
                         "{} {}",
                         console::style("Failed to delete packages in").red(),
                         console::style(subdir.as_str()).dim()
                     ));
-                    return Err(miette::miette!("Task panicked: {}", join_err));
+                    return Err(join_err.into());
                 }
             }
         }
-        tracing::debug!(
-            "Successfully deleted {} packages in subdir {}",
+        tracing::info!(
+            "Deleted {}/{} packages in subdir {}",
+            packages_to_delete_len - failed.len(),
             packages_to_delete_len,
             subdir.as_str()
         );
-        pb.finish_with_message(format!(
-            "{} {}",
-            console::style("Finished deleting packages in").green(),
-            subdir.as_str()
-        ));
+        if failed.is_empty() {
+            pb.finish_with_message(format!(
+                "{} {}",
+                console::style("Finished deleting packages in").green(),
+                console::style(subdir.as_str()).bold()
+            ));
+        } else {
+            pb.abandon_with_message(format!(
+                "{} {} with {} failures",
+                console::style("Finished deleting packages in").red(),
+                console::style(subdir.as_str()).bold(),
+                failed.len()
+            ));
+            return Err(MirrorSubdirErrorKind::FailedToDeletePackages(failed.len()));
+        }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_add(
     packages_to_add: HashMap<String, PackageRecord>,
@@ -307,22 +528,23 @@ async fn dispatch_tasks_add(
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
-) -> miette::Result<()> {
+    speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
+) -> Result<(), MirrorSubdirErrorKind> {
     if !packages_to_add.is_empty() {
         let mut tasks = FuturesUnordered::new();
 
         let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
-        let sty = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-");
+        let sty = ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")
+            .unwrap()
+            .progress_chars("##-");
         pb.set_style(sty);
+
         let packages_to_add_len = packages_to_add.len();
 
         let pb = pb.clone();
         for (filename, package_record) in packages_to_add {
             let pb = pb.clone();
+            let speed_tracker_bar = speed_tracker_bar.clone();
             let semaphore = semaphore.clone();
             let config = config.clone();
             let client = client.clone();
@@ -332,6 +554,7 @@ async fn dispatch_tasks_add(
                     .acquire()
                     .await
                     .expect("Semaphore was unexpectedly closed");
+
                 pb.set_message(format!(
                     "Mirroring {} {}",
                     subdir.as_str(),
@@ -339,59 +562,133 @@ async fn dispatch_tasks_add(
                 ));
 
                 // use rattler client for downloading the package
-                let package_url = config.package_url(filename.as_str(), subdir)?;
+                let package_url = config
+                    .package_url(filename.as_str(), subdir)
+                    .map_err(MirrorPackageErrorKind::ParseUrl)
+                    .with_filename(&filename)?;
                 let mut buf = Vec::new();
                 if package_url.scheme() == "file" {
                     let path = package_url.to_file_path().unwrap();
-                    let mut file = tokio::fs::File::open(path).await.into_diagnostic()?;
-                    file.read_to_end(&mut buf).await.into_diagnostic()?;
+                    let mut file = tokio::fs::File::open(&path)
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::FileOpen(path.clone(), e))
+                        .with_filename(&filename)?;
+                    file.read_to_end(&mut buf)
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::FileRead(path.clone(), e))
+                        .with_filename(&filename)?;
                 } else {
-                    let response = client.get(package_url).send().await.into_diagnostic()?;
-                    let bytes = response.bytes().await.into_diagnostic()?;
+                    let response = client
+                        .get(package_url.clone())
+                        .send()
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::SendRequest(package_url.clone(), e))
+                        .with_filename(&filename)?;
+                    if !response.status().is_success() {
+                        return Err(MirrorPackageErrorKind::UnsuccessfulFetch {
+                            status: response.status(),
+                            url: package_url,
+                        })
+                        .with_filename(&filename);
+                    }
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::GetResponse(package_url, e))
+                        .with_filename(&filename)?;
                     buf.extend_from_slice(&bytes);
                 };
                 tracing::debug!("Downloaded package {} with {} bytes", filename, buf.len());
+
+                // actual bytes downloaded
+                let actual_bytes = buf.len() as u64;
 
                 let expected_digest = package_record.sha256;
                 if let Some(expected_digest) = expected_digest {
                     let digest: Sha256Hash = compute_bytes_digest::<sha2::Sha256>(&buf);
                     if expected_digest != digest {
-                        return Err(miette::miette!(
-                            "Digest of {} does not match: {:x} != {:x}",
+                        return Err(MirrorPackageError {
                             filename,
-                            expected_digest,
-                            digest
-                        ));
+                            source: Box::new(MirrorPackageErrorKind::InvalidDigest {
+                                expected: expected_digest,
+                                actual: digest,
+                            }),
+                        });
                     }
+                    tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
+                } else {
+                    tracing::debug!(
+                        "No SHA256 digest found for {filename}, skipping verification."
+                    );
                 }
-                tracing::debug!("Verified SHA256 of {}", filename);
+
+                // Verify size from repodata when available.
+                if let Some(expected_size) = package_record.size
+                    && expected_size != actual_bytes
+                {
+                    return Err(MirrorPackageErrorKind::InvalidSize {
+                        expected: expected_size,
+                        actual: actual_bytes,
+                    })
+                    .with_filename(&filename);
+                }
 
                 // use opendal to upload the package
                 let destination_path = format!("{}/{}", subdir.as_str(), filename);
+                // TODO: Verify digest on S3 remote.
                 op.write(destination_path.as_str(), buf)
                     .await
-                    .into_diagnostic()?;
-
+                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
+                    .with_filename(&filename)?;
                 pb.inc(1);
-                let res: miette::Result<()> = Ok(());
+
+                let mut speed_bar_guard = speed_tracker_bar.lock().await;
+
+                // Update the total downloaded bytes
+                speed_bar_guard.downloaded_bytes += actual_bytes;
+
+                // Record current download in the speed tracker
+                speed_bar_guard.record(actual_bytes);
+
+                let avg_speed = speed_bar_guard.avg_speed();
+
+                let msg = if let Some(total_bytes) = speed_bar_guard.total_bytes {
+                    // If the total size of the download is known
+                    format!(
+                        "↕ {:.2} / {:.2} | {}",
+                        HumanBytes(speed_bar_guard.downloaded_bytes),
+                        HumanBytes(total_bytes),
+                        HumanBitsPerSecond(avg_speed),
+                    )
+                } else {
+                    // If total size is unknown, display only downloaded bytes and speed
+                    format!(
+                        "↕ {:.2} | {}",
+                        HumanBytes(speed_bar_guard.downloaded_bytes),
+                        HumanBitsPerSecond(avg_speed),
+                    )
+                };
+
+                speed_bar_guard.progress_bar.set_message(msg);
+                let res: Result<(), MirrorPackageError> = Ok(());
                 res
             };
             tasks.push(tokio::spawn(task));
         }
 
-        let mut results = Vec::new();
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
         while let Some(join_result) = tasks.next().await {
             match join_result {
-                Ok(Ok(result)) => results.push(result),
+                Ok(Ok(result)) => succeeded.push(result),
                 Ok(Err(e)) => {
-                    tasks.clear();
-                    tracing::error!("Failed to add package: {}", e);
-                    pb.abandon_with_message(format!(
-                        "{} {}",
-                        console::style("Failed to add packages in").red(),
-                        console::style(subdir.as_str()).dim()
-                    ));
-                    return Err(e);
+                    tracing::error!(
+                        "Failed to add package {subdir}/{}: {}",
+                        e.filename,
+                        e.source,
+                    );
+                    pb.inc(1);
+                    failed.push(e);
                 }
                 Err(join_err) => {
                     tasks.clear();
@@ -401,20 +698,31 @@ async fn dispatch_tasks_add(
                         console::style("Failed to add packages in").red(),
                         console::style(subdir.as_str()).dim()
                     ));
-                    return Err(miette::miette!("Task add: {}", join_err));
+                    return Err(join_err.into());
                 }
             }
         }
-        tracing::debug!(
-            "Successfully added {} packages in subdir {}",
+        tracing::info!(
+            "Added {}/{} packages in subdir {}",
+            packages_to_add_len - failed.len(),
             packages_to_add_len,
             subdir.as_str()
         );
-        pb.finish_with_message(format!(
-            "{} {}",
-            console::style("Finished adding packages in").green(),
-            subdir.as_str()
-        ));
+        if failed.is_empty() {
+            pb.finish_with_message(format!(
+                "{} {}",
+                console::style("Finished adding packages in").green(),
+                console::style(subdir.as_str()).bold()
+            ));
+        } else {
+            pb.abandon_with_message(format!(
+                "{} {} with {} failures",
+                console::style("Finished adding packages in").red(),
+                console::style(subdir.as_str()).bold(),
+                failed.len()
+            ));
+            return Err(MirrorSubdirErrorKind::FailedToAddPackages(failed.len()));
+        }
     }
     Ok(())
 }
@@ -426,38 +734,54 @@ async fn mirror_subdir<T: Configurator>(
     subdir: Platform,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
-) -> miette::Result<()> {
-    let repodata_url = config.repodata_url(subdir)?;
+    speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
+) -> Result<(), MirrorSubdirError> {
+    let repodata_url = config.repodata_url(subdir);
     let append_mode = config.append;
+    // TODO: implement spinner for repodata fetching, use rattler-repodata-gateway for sharded repodata?
     let repodata = if repodata_url.scheme() == "file" {
-        RepoData::from_path(
-            repodata_url
-                .to_file_path()
-                .map_err(|_| miette::miette!("Invalid file path: {}", repodata_url))?,
-        )
-        .into_diagnostic()?
+        let repodata_path = repodata_url.to_file_path().unwrap();
+        info!("Reading repodata from {}", repodata_path.to_string_lossy());
+        RepoData::from_path(&repodata_path)
+            .map_err(|e| MirrorSubdirErrorKind::FailedToReadRepodata(repodata_path, e))
+            .with_subdir(subdir)?
     } else {
-        let response = client.get(repodata_url).send().await.into_diagnostic()?;
+        info!("Fetching repodata from {repodata_url}");
+        let response = client
+            .get(repodata_url.clone())
+            .send()
+            .await
+            .map_err(|e| MirrorSubdirErrorKind::SendRequest(repodata_url.clone(), e))
+            .with_subdir(subdir)?;
         if !response.status().is_success() {
-            return Err(miette::miette!(
-                "Failed to fetch repodata: {}",
-                response.status()
-            ));
+            return Err(MirrorSubdirErrorKind::UnsuccessfulFetch {
+                status: response.status(),
+                url: repodata_url,
+            })
+            .with_subdir(subdir);
         }
-        let text = response.text().await.into_diagnostic()?;
-        serde_json::from_str(&text).into_diagnostic()?
+        let text = response
+            .text()
+            .await
+            .map_err(|e| MirrorSubdirErrorKind::FailedToGetResponseText(repodata_url, e))
+            .with_subdir(subdir)?;
+        serde_json::from_str(&text)
+            .map_err(MirrorSubdirErrorKind::FailedToParseRepodata)
+            .with_subdir(subdir)?
     };
     tracing::info!("Fetched repo data for subdir: {}", subdir);
 
     let builder = opendal_config.into_builder();
     let op = Operator::new(builder)
-        .into_diagnostic()?
+        .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
+        .with_subdir(subdir)?
         .layer(RetryLayer::new().with_max_times(config.max_retries.into()))
         .finish();
     let available_packages = op
         .list_with(&format!("{}/", subdir.as_str()))
         .await
-        .into_diagnostic()?
+        .map_err(MirrorSubdirErrorKind::FailedToQueryAvailablePackages)
+        .with_subdir(subdir)?
         .iter()
         .filter_map(|entry| {
             if entry.metadata().mode().is_file() {
@@ -485,19 +809,32 @@ async fn mirror_subdir<T: Configurator>(
             .collect::<Vec<_>>()
     };
     let mut packages_to_add = HashMap::new();
+    let mut subdir_size_to_add = Some(0);
     for (filename, package) in packages_to_mirror.clone() {
         if !available_packages.contains(&filename) {
+            if let Some(size) = package.size {
+                if let Some(current) = subdir_size_to_add {
+                    subdir_size_to_add = Some(current + size);
+                }
+            } else {
+                subdir_size_to_add = None;
+            }
             packages_to_add.insert(filename, package);
         }
     }
-    // We only want to log/perform deletes when not appending
-    if !packages_to_delete.is_empty() {
-        tracing::info!(
-            "Deleting {} existing packages in {}",
-            packages_to_delete.len(),
-            subdir
-        );
+
+    if let Some(add_size) = subdir_size_to_add {
+        let mut speed_bar_guard = speed_tracker_bar.lock().await;
+        if let Some(current_total) = speed_bar_guard.total_bytes.as_mut() {
+            *current_total += add_size;
+        }
     }
+
+    tracing::info!(
+        "Deleting {} existing packages in {}",
+        packages_to_delete.len(),
+        subdir
+    );
     if !append_mode {
         dispatch_tasks_delete(
             packages_to_delete,
@@ -508,6 +845,8 @@ async fn mirror_subdir<T: Configurator>(
         )
         .await?;
     }
+    .await
+    .with_subdir(subdir)?;
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
     dispatch_tasks_add(
@@ -518,8 +857,10 @@ async fn mirror_subdir<T: Configurator>(
         progress.clone(),
         semaphore.clone(),
         op.clone(),
+        speed_tracker_bar.clone(),
     )
-    .await?;
+    .await
+    .with_subdir(subdir)?;
 
     /* ---------------------------- WRITE REPODATA ---------------------------- */
     // In append mode, repodata should reflect everything present after this run which will be
@@ -584,10 +925,14 @@ async fn mirror_subdir<T: Configurator>(
         removed: repodata.removed,
         version: repodata.version,
     };
-
-    write_repodata(new_repodata, None, true, true, subdir, op)
+    let metadata = RepodataMetadataCollection::new(&op, subdir, true, true, true)
         .await
-        .map_err(|e| miette::miette!("Could not write repodata: {}", e))?;
+        .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
+        .with_subdir(subdir)?;
+    write_repodata(new_repodata, None, subdir, op, &metadata)
+        .await
+        .map_err(MirrorSubdirErrorKind::WriteRepodata)
+        .with_subdir(subdir)?;
     // todo: check if non-conda and non-repodata files exist, print warning if any
     Ok(())
 }
@@ -604,7 +949,7 @@ async fn get_subdirs(
 
     for subdir in Platform::all() {
         tracing::debug!("Checking subdir: {}", subdir);
-        let repodata_url = config.repodata_url(subdir)?;
+        let repodata_url = config.repodata_url(subdir);
 
         // todo: parallelize
         if repodata_url.scheme() == "file" {
@@ -639,31 +984,31 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
     let mut client_builder = ClientBuilder::new(client.clone());
 
     let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-    if let NamedChannelOrUrl::Url(source_url) = config.source.clone() {
-        if source_url.scheme() == "s3" {
-            let s3_host = source_url
-                .host()
-                .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
-                .to_string();
-            let s3_config = config
-                .clone()
-                .s3_config_source
-                .ok_or(miette::miette!("No S3 source config set"))?;
+    if let NamedChannelOrUrl::Url(source_url) = config.source.clone()
+        && source_url.scheme() == "s3"
+    {
+        let s3_host = source_url
+            .host()
+            .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
+            .to_string();
+        let s3_config = config
+            .clone()
+            .s3_config_source
+            .ok_or(miette::miette!("No S3 source config set"))?;
 
-            let s3_middleware = S3Middleware::new(
-                HashMap::from([(
-                    s3_host,
-                    S3Config::Custom {
-                        endpoint_url: s3_config.endpoint_url,
-                        region: s3_config.region,
-                        force_path_style: s3_config.force_path_style,
-                    },
-                )]),
-                // TODO: once rattler has a custom InMemoryBackend, add this to auth_store with custom source credentials
-                auth_store,
-            );
-            client_builder = client_builder.with(s3_middleware);
-        }
+        let s3_middleware = S3Middleware::new(
+            HashMap::from([(
+                s3_host,
+                S3Config::Custom {
+                    endpoint_url: s3_config.endpoint_url,
+                    region: s3_config.region,
+                    force_path_style: s3_config.force_path_style,
+                },
+            )]),
+            // TODO: once rattler has a custom InMemoryBackend, add this to auth_store with custom source credentials
+            auth_store,
+        );
+        client_builder = client_builder.with(s3_middleware);
     }
 
     let auth_store = if let Some(s3_credentials) = config.s3_credentials_source.clone() {
