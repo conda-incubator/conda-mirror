@@ -9,13 +9,12 @@ use rattler_digest::{Sha256Hash, compute_bytes_digest};
 use rattler_index::write_repodata;
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
-    authentication_storage::{StorageBackend, backends::{file, memory::MemoryStorage}},
+    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, reqwest::Client};
 use reqwest_retry::RetryTransientMiddleware;
-use tokio_util::bytes;
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
