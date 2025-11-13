@@ -9,12 +9,13 @@ use rattler_digest::{Sha256Hash, compute_bytes_digest};
 use rattler_index::write_repodata;
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
-    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
+    authentication_storage::{StorageBackend, backends::{file, memory::MemoryStorage}},
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, reqwest::Client};
 use reqwest_retry::RetryTransientMiddleware;
+use tokio_util::bytes;
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
@@ -541,25 +542,46 @@ async fn mirror_subdir<T: Configurator>(
         // Mirror only what we want this run.
         packages_to_mirror.keys().cloned().collect()
     };
-    // Build maps from source repodata records for the filenames we want to index
-    // (We only index fields that exist in the source repodata)
-    let packages = repodata
+    // In append mode, start from existing repodata at output destination (if any)
+    let mut base_packages = repodata.packages.clone();
+    base_packages.clear();
+    let mut base_conda_packages = repodata.conda_packages.clone();
+    base_conda_packages.clear();
+    if append_mode {
+        // Try to read repodata from destination
+        if let Ok(buf) = op.read(&format!("{}/repodata.json", subdir.as_str())).await {
+            let bytes = buf.to_vec();
+            if let Ok(mut existing) = serde_json::from_slice::<RepoData>(&bytes) {
+                existing.packages.retain(|k, _| filenames_to_index.contains(k));
+                existing.conda_packages.retain(|k, _| filenames_to_index.contains(k));
+                // reuse maps with the correct hasher, no type mismatch
+                base_packages = existing.packages;
+                base_conda_packages = existing.conda_packages;
+            }
+        }
+    }
+
+    // Overlay with source repodata for anything we have metadata for
+    for (k, v) in repodata
         .packages
         .iter()
-        .filter(|(filename, _)| filenames_to_index.contains(*filename))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let conda_packages = repodata
+        .filter(|(k, _)| filenames_to_index.contains(*k)) {
+            base_packages.insert(k.clone(), v.clone());
+            base_conda_packages.remove(k);
+        }
+    for (k, v) in repodata
         .conda_packages
         .iter()
-        .filter(|(filename, _)| filenames_to_index.contains(*filename))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+        .filter(|(k, _)| filenames_to_index.contains(*k)) {
+            base_conda_packages.insert(k.clone(), v.clone());
+            base_packages.remove(k);
+        }
+    
 
     let new_repodata = RepoData {
         info: repodata.info,
-        packages,
-        conda_packages,
+        packages: base_packages,
+        conda_packages: base_conda_packages,
         removed: repodata.removed,
         version: repodata.version,
     };
