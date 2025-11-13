@@ -5,10 +5,11 @@ use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use opendal::ErrorKind as OdErrorKind;
 use rattler_conda_types::{
-    ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
+    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
+    package::ArchiveType,
 };
 use rattler_digest::{Sha256Hash, compute_bytes_digest};
-use rattler_index::{RepodataMetadataCollection, write_repodata};
+use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
@@ -405,20 +406,20 @@ fn get_packages_to_mirror(
         MirrorMode::OnlyInclude(include) => all_packages
             .clone()
             .into_iter()
-            .filter(|pkg| include.iter().any(|i| i.matches(pkg.1.clone())))
+            .filter(|pkg| include.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::AllButExclude(exclude) => all_packages
             .clone()
             .into_iter()
-            .filter(|pkg| !exclude.iter().any(|i| i.matches(pkg.1.clone())))
+            .filter(|pkg| !exclude.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::IncludeExclude(include, exclude) => all_packages
             .clone()
             .into_iter()
             .filter(|pkg| {
-                !exclude.iter().any(|i| {
-                    i.matches(pkg.1.clone()) || include.iter().any(|i| i.matches(pkg.1.clone()))
-                })
+                !exclude
+                    .iter()
+                    .any(|i| i.matches(&pkg.1) || include.iter().any(|i| i.matches(&pkg.1)))
             })
             .collect(),
     }
@@ -939,10 +940,11 @@ async fn mirror_subdir<T: Configurator>(
             }
         }
     }
-    let metadata = RepodataMetadataCollection::new(&op, subdir, true, true, true)
-        .await  
-        .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
-        .with_subdir(subdir)?;
+    let metadata = 
+        RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
+          .await  
+          .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
+          .with_subdir(subdir)?;
     write_repodata(new_repodata, None, subdir, op, &metadata)
         .await
         .map_err(MirrorSubdirErrorKind::WriteRepodata)
