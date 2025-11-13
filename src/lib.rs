@@ -2,8 +2,8 @@ use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
-use opendal::{Configurator, Operator, layers::RetryLayer};
 use opendal::ErrorKind as OdErrorKind;
+use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
     package::ArchiveType,
@@ -895,8 +895,12 @@ async fn mirror_subdir<T: Configurator>(
         if let Ok(buf) = op.read(&format!("{}/repodata.json", subdir.as_str())).await {
             let bytes = buf.to_vec();
             if let Ok(mut existing) = serde_json::from_slice::<RepoData>(&bytes) {
-                existing.packages.retain(|k, _| filenames_to_index.contains(k));
-                existing.conda_packages.retain(|k, _| filenames_to_index.contains(k));
+                existing
+                    .packages
+                    .retain(|k, _| filenames_to_index.contains(k));
+                existing
+                    .conda_packages
+                    .retain(|k, _| filenames_to_index.contains(k));
                 // reuse maps with the correct hasher, no type mismatch
                 base_packages = existing.packages;
                 base_conda_packages = existing.conda_packages;
@@ -908,18 +912,19 @@ async fn mirror_subdir<T: Configurator>(
     for (k, v) in repodata
         .packages
         .iter()
-        .filter(|(k, _)| filenames_to_index.contains(*k)) {
-            base_packages.insert(k.clone(), v.clone());
-            base_conda_packages.remove(k);
-        }
+        .filter(|(k, _)| filenames_to_index.contains(*k))
+    {
+        base_packages.insert(k.clone(), v.clone());
+        base_conda_packages.shift_remove(k);
+    }
     for (k, v) in repodata
         .conda_packages
         .iter()
-        .filter(|(k, _)| filenames_to_index.contains(*k)) {
-            base_conda_packages.insert(k.clone(), v.clone());
-            base_packages.remove(k);
-        }
-    
+        .filter(|(k, _)| filenames_to_index.contains(*k))
+    {
+        base_conda_packages.insert(k.clone(), v.clone());
+        base_packages.shift_remove(k);
+    }
 
     let new_repodata = RepoData {
         info: repodata.info,
@@ -930,21 +935,26 @@ async fn mirror_subdir<T: Configurator>(
     };
 
     // Ensure sidecar(s) don't exist before write_repodata tries to create-new
-    for name in ["repodata_from_packages.json", "current_repodata.json", 
-        "repodata.json", "repodata.json.zst", "repodata_shards.msgpack.zst"] {
+    for name in [
+        "repodata_from_packages.json",
+        "current_repodata.json",
+        "repodata.json",
+        "repodata.json.zst",
+        "repodata_shards.msgpack.zst",
+    ] {
         let path = format!("{}/{}", subdir.as_str(), name);
-        if let Err(e) = op.delete(&path).await {
-            if e.kind() != OdErrorKind::NotFound {
-                // surface any other filesystem error
-                return Err(MirrorSubdirErrorKind::WriteRepodata(e.into())).with_subdir(subdir);
-            }
+        if let Err(e) = op.delete(&path).await
+            && e.kind() != OdErrorKind::NotFound
+        {
+            // surface any other filesystem error
+            return Err(MirrorSubdirErrorKind::WriteRepodata(e.into())).with_subdir(subdir);
         }
     }
-    let metadata = 
+    let metadata =
         RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
-          .await  
-          .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
-          .with_subdir(subdir)?;
+            .await
+            .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
+            .with_subdir(subdir)?;
     write_repodata(new_repodata, None, subdir, op, &metadata)
         .await
         .map_err(MirrorSubdirErrorKind::WriteRepodata)
