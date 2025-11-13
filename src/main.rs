@@ -156,6 +156,7 @@ async fn main() -> miette::Result<()> {
         mode,
         max_retries,
         max_parallel,
+        append,
         cli_config.no_progress,
         s3_config_source,
         s3_config_destination,

@@ -3,6 +3,7 @@ use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
+use opendal::ErrorKind as OdErrorKind;
 use rattler_conda_types::{
     ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
@@ -163,6 +164,8 @@ where
 pub enum MirrorSubdirErrorKind {
     #[error("failed to read repodata {0}: {1}")]
     FailedToReadRepodata(PathBuf, #[source] std::io::Error),
+    #[error("failed to collect repodata metadata: {0}")]
+    CollectRepodataMetadata(#[source] anyhow::Error),
     #[error("failed to send request to {0}: {1}")]
     SendRequest(Url, #[source] reqwest_middleware::Error),
     #[error("error while fetching {url}: got status {status}")]
@@ -843,10 +846,9 @@ async fn mirror_subdir<T: Configurator>(
             semaphore.clone(),
             op.clone(),
         )
-        .await?;
+        .await
+        .with_subdir(subdir)?;
     }
-    .await
-    .with_subdir(subdir)?;
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
     dispatch_tasks_add(
@@ -925,9 +927,21 @@ async fn mirror_subdir<T: Configurator>(
         removed: repodata.removed,
         version: repodata.version,
     };
+
+    // Ensure sidecar(s) don't exist before write_repodata tries to create-new
+    for name in ["repodata_from_packages.json", "current_repodata.json", 
+        "repodata.json", "repodata.json.zst", "repodata_shards.msgpack.zst"] {
+        let path = format!("{}/{}", subdir.as_str(), name);
+        if let Err(e) = op.delete(&path).await {
+            if e.kind() != OdErrorKind::NotFound {
+                // surface any other filesystem error
+                return Err(MirrorSubdirErrorKind::WriteRepodata(e.into())).with_subdir(subdir);
+            }
+        }
+    }
     let metadata = RepodataMetadataCollection::new(&op, subdir, true, true, true)
-        .await
-        .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
+        .await  
+        .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
         .with_subdir(subdir)?;
     write_repodata(new_repodata, None, subdir, op, &metadata)
         .await
