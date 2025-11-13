@@ -116,7 +116,8 @@ source: conda-forge
 destination: ./my-channel
 
 include:
-  - name-glob: jupyter*
+  # you can also use globs in MatchSpecs
+  - jupyter*[license="MIT"]
 ```
 
 Exclude all packages defined in `exclude`, override this behavior by specifying overrides in `include`:
@@ -126,9 +127,11 @@ source: conda-forge
 destination: ./my-channel
 
 include:
-  - jupyter-ai
+  - jupyter*
 exclude:
-  - name-glob: jupyter*
+  - jupyter-fs
+  # you can also use regex in MatchSpecs (needs to start with ^ and end with $)
+  - ^jupyter-ai.*$
 ```
 
 Only mirror certain subdirs:

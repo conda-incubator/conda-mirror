@@ -1,10 +1,10 @@
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
-    Channel, ChannelConfig, MatchSpec, Matches, NamedChannelOrUrl, NamelessMatchSpec,
-    PackageRecord, Platform,
+    Channel, ChannelConfig, MatchSpec, NamedChannelOrUrl, ParseStrictness,
+    ParseStrictnessWithNameMatcher, Platform,
 };
 use serde::{Deserialize, Deserializer};
-use std::{env::current_dir, path::PathBuf, str::FromStr};
+use std::{env::current_dir, path::PathBuf};
 
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
@@ -123,39 +123,8 @@ impl std::fmt::Debug for S3Credentials {
 /* -------------------------------------------- YAML ------------------------------------------- */
 
 #[derive(Debug, Clone)]
-pub struct GlobPattern(glob::Pattern);
-
-impl<'de> Deserialize<'de> for GlobPattern {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        glob::Pattern::from_str(&s)
-            .map(GlobPattern)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct NamelessMatchSpecWrapper(NamelessMatchSpec);
-
-impl<'de> Deserialize<'de> for NamelessMatchSpecWrapper {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let wrapper = NamelessMatchSpecWrapper(s.parse().map_err(serde::de::Error::custom)?);
-        tracing::trace!("Deserialized NamelessMatchSpec: {wrapper:?}");
-        Ok(wrapper)
-    }
-}
-
-#[derive(Debug, Clone)]
-#[repr(transparent)]
-pub struct MatchSpecWrapper(MatchSpec);
+pub struct MatchSpecWrapper(pub MatchSpec);
 
 impl<'de> Deserialize<'de> for MatchSpecWrapper {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -163,40 +132,18 @@ impl<'de> Deserialize<'de> for MatchSpecWrapper {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let wrapper = MatchSpecWrapper(s.parse().map_err(serde::de::Error::custom)?);
+        let wrapper = MatchSpecWrapper(
+            MatchSpec::from_str(
+                &s,
+                ParseStrictnessWithNameMatcher {
+                    parse_strictness: ParseStrictness::Strict,
+                    exact_names_only: false,
+                },
+            )
+            .map_err(serde::de::Error::custom)?,
+        );
         tracing::trace!("Deserialized MatchSpec: {wrapper:?}");
         Ok(wrapper)
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum PackageConfig {
-    #[serde(rename_all = "kebab-case")]
-    PackageGlob {
-        // TODO: use regular glob once https://github.com/conda/rattler/issues/1239 is done
-        name_glob: GlobPattern,
-        matchspec: Option<NamelessMatchSpecWrapper>,
-    },
-    MatchSpec(MatchSpecWrapper),
-}
-
-impl PackageConfig {
-    pub(crate) fn matches(&self, package_record: PackageRecord) -> bool {
-        match self {
-            PackageConfig::PackageGlob {
-                name_glob,
-                matchspec,
-            } => {
-                let name_match = name_glob.0.matches(package_record.name.as_normalized());
-                if let Some(matchspec) = matchspec {
-                    name_match && matchspec.0.matches(&package_record)
-                } else {
-                    name_match
-                }
-            }
-            PackageConfig::MatchSpec(matchspec) => matchspec.0.matches(&package_record),
-        }
     }
 }
 
@@ -226,8 +173,8 @@ pub struct CondaMirrorYamlConfig {
     pub max_retries: Option<u8>,
     pub max_parallel: Option<u8>,
 
-    pub include: Option<Vec<PackageConfig>>,
-    pub exclude: Option<Vec<PackageConfig>>,
+    pub include: Option<Vec<MatchSpecWrapper>>,
+    pub exclude: Option<Vec<MatchSpecWrapper>>,
     pub s3_config: Option<S3ConfigSourceDest>,
 }
 
@@ -238,12 +185,12 @@ pub enum MirrorMode {
     /// Mirror all packages.
     All,
     /// Mirror all packages except those matching the given patterns.
-    AllButExclude(Vec<PackageConfig>),
+    AllButExclude(Vec<MatchSpec>),
     /// Mirror only packages matching the given patterns.
-    OnlyInclude(Vec<PackageConfig>),
+    OnlyInclude(Vec<MatchSpec>),
     /// Mirror all packages except those matching the given patterns.
     /// Override excludes with include patterns.
-    IncludeExclude(Vec<PackageConfig>, Vec<PackageConfig>),
+    IncludeExclude(Vec<MatchSpec>, Vec<MatchSpec>),
 }
 
 #[derive(Clone, Debug)]
