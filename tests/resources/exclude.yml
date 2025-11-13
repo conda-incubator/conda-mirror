@@ -5,6 +5,5 @@ destination: ./robostack-fs-mirror
 exclude:
   # you can use MatchSpecs here
   - jupyter-ros ==0.5.0
-  # or globs over names
-  - name-glob: "*"
-    matchspec: "[license=AGPL-3.0-or-later]"
+  # or globs over names with constraints
+  - "*[license=AGPL-3.0-or-later]"

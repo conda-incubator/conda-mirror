@@ -1,5 +1,5 @@
-source: robostack
-destination: ./robostack-fs-mirror
+source: conda-forge
+destination: ./conda-forge-fs-mirror
 subdirs:
   - linux-64
   - osx-arm64
@@ -8,5 +8,4 @@ subdirs:
 
 # include none except these
 include:
-  - name-glob: jupyter*
-    matchspec: ">=11"
+  - jupyter*[license="MIT"]

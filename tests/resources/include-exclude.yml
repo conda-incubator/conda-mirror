@@ -2,8 +2,7 @@ source: bioconda
 destination: ./bioconda-fs-mirror
 
 exclude:
-  - name-glob: "*"
-    matchspec: "[license=GPL-3.0-or-later]"
+  - "*[license=GPL-3.0-or-later]"
 
 # override excludes
 include:
