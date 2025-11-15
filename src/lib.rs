@@ -2,6 +2,7 @@ use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
+use opendal::ErrorKind as OdErrorKind;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
@@ -164,6 +165,8 @@ where
 pub enum MirrorSubdirErrorKind {
     #[error("failed to read repodata {0}: {1}")]
     FailedToReadRepodata(PathBuf, #[source] std::io::Error),
+    #[error("failed to collect repodata metadata: {0}")]
+    CollectRepodataMetadata(#[source] anyhow::Error),
     #[error("failed to send request to {0}: {1}")]
     SendRequest(Url, #[source] reqwest_middleware::Error),
     #[error("error while fetching {url}: got status {status}")]
@@ -738,6 +741,7 @@ async fn mirror_subdir<T: Configurator>(
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
 ) -> Result<(), MirrorSubdirError> {
     let repodata_url = config.repodata_url(subdir);
+    let append_mode = config.append;
     // TODO: implement spinner for repodata fetching, use rattler-repodata-gateway for sharded repodata?
     let repodata = if repodata_url.scheme() == "file" {
         let repodata_path = repodata_url.to_file_path().unwrap();
@@ -799,10 +803,15 @@ async fn mirror_subdir<T: Configurator>(
         packages_to_mirror.len(),
         subdir,
     );
-    let packages_to_delete = available_packages
-        .difference(&packages_to_mirror.keys().cloned().collect::<HashSet<_>>())
-        .cloned()
-        .collect::<Vec<_>>();
+    // Compute deletions unless we're in append mode.
+    let packages_to_delete = if append_mode {
+        Vec::new()
+    } else {
+        available_packages
+            .difference(&packages_to_mirror.keys().cloned().collect::<HashSet<_>>())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let mut packages_to_add = HashMap::new();
     let mut subdir_size_to_add = Some(0);
     for (filename, package) in packages_to_mirror.clone() {
@@ -830,15 +839,17 @@ async fn mirror_subdir<T: Configurator>(
         packages_to_delete.len(),
         subdir
     );
-    dispatch_tasks_delete(
-        packages_to_delete,
-        subdir,
-        progress.clone(),
-        semaphore.clone(),
-        op.clone(),
-    )
-    .await
-    .with_subdir(subdir)?;
+    if !append_mode {
+        dispatch_tasks_delete(
+            packages_to_delete,
+            subdir,
+            progress.clone(),
+            semaphore.clone(),
+            op.clone(),
+        )
+        .await
+        .with_subdir(subdir)?;
+    }
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
     dispatch_tasks_add(
@@ -855,43 +866,94 @@ async fn mirror_subdir<T: Configurator>(
     .with_subdir(subdir)?;
 
     /* ---------------------------- WRITE REPODATA ---------------------------- */
-    let packages = packages_to_mirror
+    // In append mode, repodata should reflect everything present after this run which will be
+    // union(existing files, newly added). Otherwise, keep true mirror.
+    let filenames_to_index: HashSet<String> = if append_mode {
+        // Files that already existed before this run.
+        let previously_available = available_packages;
+        // Files we're adding now which are present in the desired set but not in previously available.
+        let newly_added_files = packages_to_mirror
+            .keys()
+            .filter(|k| !previously_available.contains(*k))
+            .cloned()
+            .collect::<HashSet<_>>();
+        previously_available
+            .into_iter()
+            .chain(newly_added_files.into_iter())
+            .collect()
+    } else {
+        // Mirror only what we want this run.
+        packages_to_mirror.keys().cloned().collect()
+    };
+    // In append mode, start from existing repodata at output destination (if any)
+    let mut base_packages = repodata.packages.clone();
+    base_packages.clear();
+    let mut base_conda_packages = repodata.conda_packages.clone();
+    base_conda_packages.clear();
+    if append_mode {
+        // Try to read repodata from destination
+        if let Ok(buf) = op.read(&format!("{}/repodata.json", subdir.as_str())).await {
+            let bytes = buf.to_vec();
+            if let Ok(mut existing) = serde_json::from_slice::<RepoData>(&bytes) {
+                existing
+                    .packages
+                    .retain(|k, _| filenames_to_index.contains(k));
+                existing
+                    .conda_packages
+                    .retain(|k, _| filenames_to_index.contains(k));
+                // reuse maps with the correct hasher, no type mismatch
+                base_packages = existing.packages;
+                base_conda_packages = existing.conda_packages;
+            }
+        }
+    }
+
+    // Overlay with source repodata for anything we have metadata for
+    for (k, v) in repodata
+        .packages
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => true,
-                Some(ArchiveType::Conda) => false,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let conda_packages = packages_to_mirror
+        .filter(|(k, _)| filenames_to_index.contains(*k))
+    {
+        base_packages.insert(k.clone(), v.clone());
+        base_conda_packages.shift_remove(k);
+    }
+    for (k, v) in repodata
+        .conda_packages
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => false,
-                Some(ArchiveType::Conda) => true,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+        .filter(|(k, _)| filenames_to_index.contains(*k))
+    {
+        base_conda_packages.insert(k.clone(), v.clone());
+        base_packages.shift_remove(k);
+    }
+
     let new_repodata = RepoData {
         info: repodata.info,
-        packages,
-        conda_packages,
+        packages: base_packages,
+        conda_packages: base_conda_packages,
         removed: repodata.removed,
         version: repodata.version,
     };
+
+    // Ensure sidecar(s) don't exist before write_repodata tries to create-new
+    for name in [
+        "repodata_from_packages.json",
+        "current_repodata.json",
+        "repodata.json",
+        "repodata.json.zst",
+        "repodata_shards.msgpack.zst",
+    ] {
+        let path = format!("{}/{}", subdir.as_str(), name);
+        if let Err(e) = op.delete(&path).await
+            && e.kind() != OdErrorKind::NotFound
+        {
+            // surface any other filesystem error
+            return Err(MirrorSubdirErrorKind::WriteRepodata(e.into())).with_subdir(subdir);
+        }
+    }
     let metadata =
         RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
             .await
-            .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
+            .map_err(|e| MirrorSubdirErrorKind::CollectRepodataMetadata(e.into()))
             .with_subdir(subdir)?;
     write_repodata(new_repodata, None, subdir, op, &metadata)
         .await

@@ -32,6 +32,12 @@ pub struct CliConfig {
     #[arg(short, long)]
     pub config: Option<PathBuf>,
 
+    /// Enable append mode: do not delete packages that already exist at destination.
+    /// Only add missing ones and rewrite repodata. Default is off.
+    /// Can also be enabled via YAML with `append: true`.
+    #[arg(long)]
+    pub append: bool,
+
     /// Maximum number of retries.
     #[arg(long, default_value_t = 10)]
     pub max_retries: u8,
@@ -175,6 +181,7 @@ pub struct CondaMirrorYamlConfig {
 
     pub include: Option<Vec<MatchSpecWrapper>>,
     pub exclude: Option<Vec<MatchSpecWrapper>>,
+    pub append: Option<bool>,
     pub s3_config: Option<S3ConfigSourceDest>,
 }
 
@@ -206,6 +213,7 @@ pub struct CondaMirrorConfig {
     pub s3_config_destination: Option<S3Config>,
     pub s3_credentials_source: Option<S3Credentials>,
     pub s3_credentials_destination: Option<S3Credentials>,
+    pub append: bool,
     pub channel_source: Channel,
 }
 
@@ -219,6 +227,7 @@ impl CondaMirrorConfig {
         mode: MirrorMode,
         max_retries: u8,
         max_parallel: u8,
+        append: bool,
         no_progress: bool,
         s3_config_source: Option<S3Config>,
         s3_config_destination: Option<S3Config>,
@@ -238,6 +247,7 @@ impl CondaMirrorConfig {
             mode,
             max_retries,
             max_parallel,
+            append,
             no_progress,
             s3_config_source,
             s3_config_destination,

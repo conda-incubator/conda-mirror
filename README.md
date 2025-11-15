@@ -146,6 +146,27 @@ subdirs:
   - win-64
 ```
 
+### Append to Existing Mirror
+
+When trying to add new packages to existing mirror, the `--append` flag can be used to prevent deletion of existing packages (default behavior). The repodata will be rewritten with this flag enabled.
+
+**Notes**
+
+- The CLI option will override the YAML option.
+- In append mode the tool skips deletions and repodata is written for the union of previously present files plus the files added in the current run.
+- Files that exist locally but are not in the source `repodata.json` won't be indexed.
+- To make a strict snapshot again, re-run without `--append`.
+
+Append new packages to the existing mirror:
+
+```yml
+source: conda-forge
+destination: ./my-channel
+append: true
+include:
+  - matplotlib
+```
+
 #### S3 configuration
 
 When using S3, you need to configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.
