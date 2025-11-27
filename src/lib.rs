@@ -188,6 +188,8 @@ pub enum MirrorSubdirErrorKind {
     FailedToAddPackages(usize),
     #[error("task panicked: {0}")]
     JoinError(#[from] JoinError),
+    #[error("url parse error: {0}")]
+    UrlParseError(#[source] url::ParseError),
     #[error("failed to write repodata: {0}")]
     // https://github.com/conda/rattler/issues/1726
     WriteRepodata(#[source] anyhow::Error),
@@ -583,8 +585,7 @@ async fn dispatch_tasks_add(
         let op = op.clone();
         let package_url = config
             .package_url(filename.as_str(), subdir)
-            .map_err(MirrorPackageErrorKind::ParseUrl)
-            .unwrap(); // todo
+            .map_err(MirrorSubdirErrorKind::UrlParseError)?;
         let task = async move {
             let _permit = semaphore
                 .acquire()
@@ -649,6 +650,11 @@ async fn dispatch_tasks_add(
             let digest = hasher.finalize();
             if let Some(expected_digest) = expected_digest {
                 if expected_digest != digest {
+                    writer
+                        .abort()
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                        .with_filename(&filename)?;
                     return Err(MirrorPackageError {
                         filename,
                         source: Box::new(MirrorPackageErrorKind::InvalidDigest {
@@ -666,6 +672,11 @@ async fn dispatch_tasks_add(
             if let Some(expected_size) = package_record.size
                 && expected_size != actual_bytes
             {
+                writer
+                    .abort()
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                    .with_filename(&filename)?;
                 return Err(MirrorPackageErrorKind::InvalidSize {
                     expected: expected_size,
                     actual: actual_bytes,
