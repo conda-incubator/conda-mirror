@@ -844,7 +844,7 @@ async fn mirror_subdir<T: Configurator>(
 
     let repodata_info = repodata.info.clone();
     let repodata_version = repodata.version;
-    let repodata_removed = repodata.removed.clone(); // todo: maybe pass only packages+conda_packages below
+    let repodata_removed = repodata.removed.clone();
     let packages_to_mirror = get_packages_to_mirror(repodata, &config);
     tracing::info!(
         "Mirroring {} packages in {}",
@@ -893,7 +893,6 @@ async fn mirror_subdir<T: Configurator>(
     .with_subdir(subdir)?;
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
-    // let packages_to_add = packages_to_add.into_iter().take(1000).collect();
     dispatch_tasks_add(
         packages_to_add,
         subdir,
