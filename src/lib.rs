@@ -1,4 +1,4 @@
-use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
+use futures::{Stream, StreamExt, lock::Mutex, stream::FuturesUnordered};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
@@ -7,7 +7,7 @@ use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
     package::ArchiveType,
 };
-use rattler_digest::{Sha256Hash, compute_bytes_digest};
+use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
@@ -21,16 +21,22 @@ use reqwest_middleware::{
     reqwest::{self, Client},
 };
 use reqwest_retry::RetryTransientMiddleware;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env::current_dir,
     fmt,
     path::PathBuf,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tokio::{io::AsyncReadExt, sync::Semaphore, task::JoinError};
+use tokio::{fs::File, sync::Semaphore, task::JoinError};
+use tokio_util::{
+    bytes,
+    codec::{BytesCodec, FramedRead},
+};
 use tracing::info;
 use url::Url;
 
@@ -392,33 +398,57 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
 }
 
 fn get_packages_to_mirror(
-    repodata: &RepoData,
+    repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<String, PackageRecord> {
-    let mut all_packages = HashMap::new();
-    all_packages.extend(repodata.packages.clone());
-    all_packages.extend(repodata.conda_packages.clone());
+    let all_packages = repodata
+        .packages
+        .into_iter()
+        .chain(repodata.conda_packages.into_iter());
     match config.mode.clone() {
-        MirrorMode::All => all_packages.clone(),
+        MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| include.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::AllButExclude(exclude) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| !exclude.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::IncludeExclude(include, exclude) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| {
                 !exclude
                     .iter()
                     .any(|i| i.matches(&pkg.1) || include.iter().any(|i| i.matches(&pkg.1)))
             })
             .collect(),
+    }
+}
+
+enum BytesStream {
+    File(PathBuf, FramedRead<File, BytesCodec>),
+    Reqwest(
+        Url,
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<tokio_util::bytes::Bytes, reqwest_middleware::reqwest::Error>,
+                    > + Send,
+            >,
+        >,
+    ),
+}
+
+impl BytesStream {
+    async fn next(&mut self) -> Option<Result<bytes::Bytes, MirrorPackageErrorKind>> {
+        match self {
+            BytesStream::File(path, stream) => stream.next().await.map(|bytes| {
+                bytes
+                    .map_err(|e| MirrorPackageErrorKind::FileRead(path.clone(), e))
+                    .map(|bytes| bytes.into())
+            }),
+            BytesStream::Reqwest(url, stream) => stream.next().await.map(|bytes| {
+                bytes.map_err(|e| MirrorPackageErrorKind::GetResponse(url.clone(), e))
+            }),
+        }
     }
 }
 
@@ -549,9 +579,12 @@ async fn dispatch_tasks_add(
         let pb = pb.clone();
         let speed_tracker_bar = speed_tracker_bar.clone();
         let semaphore = semaphore.clone();
-        let config = config.clone();
         let client = client.clone();
         let op = op.clone();
+        let package_url = config
+            .package_url(filename.as_str(), subdir)
+            .map_err(MirrorPackageErrorKind::ParseUrl)
+            .unwrap(); // todo
         let task = async move {
             let _permit = semaphore
                 .acquire()
@@ -565,21 +598,16 @@ async fn dispatch_tasks_add(
             ));
 
             // use rattler client for downloading the package
-            let package_url = config
-                .package_url(filename.as_str(), subdir)
-                .map_err(MirrorPackageErrorKind::ParseUrl)
-                .with_filename(&filename)?;
-            let mut buf = Vec::new();
-            if package_url.scheme() == "file" {
+            // let mut buf = Vec::new();
+            let mut stream: BytesStream = if package_url.scheme() == "file" {
                 let path = package_url.to_file_path().unwrap();
-                let mut file = tokio::fs::File::open(&path)
+                let file = tokio::fs::File::open(&path)
                     .await
                     .map_err(|e| MirrorPackageErrorKind::FileOpen(path.clone(), e))
                     .with_filename(&filename)?;
-                file.read_to_end(&mut buf)
-                    .await
-                    .map_err(|e| MirrorPackageErrorKind::FileRead(path.clone(), e))
-                    .with_filename(&filename)?;
+                let read =
+                    tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new());
+                BytesStream::File(path, read)
             } else {
                 let response = client
                     .get(package_url.clone())
@@ -594,21 +622,33 @@ async fn dispatch_tasks_add(
                     })
                     .with_filename(&filename);
                 }
-                let bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|e| MirrorPackageErrorKind::GetResponse(package_url, e))
-                    .with_filename(&filename)?;
-                buf.extend_from_slice(&bytes);
+                BytesStream::Reqwest(package_url, Box::pin(response.bytes_stream()))
             };
-            tracing::debug!("Downloaded package {} with {} bytes", filename, buf.len());
 
-            // actual bytes downloaded
-            let actual_bytes = buf.len() as u64;
+            let mut hasher = Sha256::default();
+            let mut actual_bytes: u64 = 0;
+            let destination_path = format!("{}/{}", subdir.as_str(), filename);
+            let mut writer = op
+                .writer(destination_path.as_str())
+                .await
+                .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                .with_filename(&filename)?;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.with_filename(&filename)?;
+                hasher.update(&chunk);
+                actual_bytes += chunk.len() as u64;
+                writer
+                    .write(chunk)
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                    .with_filename(&filename)?;
+            }
+
+            tracing::debug!("Downloaded package {filename} with {actual_bytes} bytes");
 
             let expected_digest = package_record.sha256;
+            let digest = hasher.finalize();
             if let Some(expected_digest) = expected_digest {
-                let digest: Sha256Hash = compute_bytes_digest::<sha2::Sha256>(&buf);
                 if expected_digest != digest {
                     return Err(MirrorPackageError {
                         filename,
@@ -635,9 +675,9 @@ async fn dispatch_tasks_add(
             }
 
             // use opendal to upload the package
-            let destination_path = format!("{}/{}", subdir.as_str(), filename);
             // TODO: Verify digest on S3 remote.
-            op.write(destination_path.as_str(), buf)
+            writer
+                .close()
                 .await
                 .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
                 .with_filename(&filename)?;
@@ -768,6 +808,7 @@ async fn mirror_subdir<T: Configurator>(
             .map_err(MirrorSubdirErrorKind::FailedToParseRepodata)
             .with_subdir(subdir)?
     };
+    println!("repodata size: {}", std::mem::size_of_val(&repodata));
     tracing::info!("Fetched repo data for subdir: {}", subdir);
 
     let builder = opendal_config.into_builder();
@@ -792,7 +833,10 @@ async fn mirror_subdir<T: Configurator>(
         })
         .collect::<HashSet<_>>();
 
-    let packages_to_mirror = get_packages_to_mirror(&repodata, &config);
+    let repodata_info = repodata.info.clone();
+    let repodata_version = repodata.version;
+    let repodata_removed = repodata.removed.clone(); // todo: maybe pass only packages+conda_packages below
+    let packages_to_mirror = get_packages_to_mirror(repodata, &config);
     tracing::info!(
         "Mirroring {} packages in {}",
         packages_to_mirror.len(),
@@ -840,6 +884,7 @@ async fn mirror_subdir<T: Configurator>(
     .with_subdir(subdir)?;
 
     tracing::info!("Adding {} packages in {}", packages_to_add.len(), subdir);
+    // let packages_to_add = packages_to_add.into_iter().take(1000).collect();
     dispatch_tasks_add(
         packages_to_add,
         subdir,
@@ -881,11 +926,11 @@ async fn mirror_subdir<T: Configurator>(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let new_repodata = RepoData {
-        info: repodata.info,
+        info: repodata_info,
         packages,
         conda_packages,
-        removed: repodata.removed,
-        version: repodata.version,
+        removed: repodata_removed,
+        version: repodata_version,
     };
     let metadata =
         RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
