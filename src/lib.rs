@@ -598,7 +598,6 @@ async fn dispatch_tasks_add(
             ));
 
             // use rattler client for downloading the package
-            // let mut buf = Vec::new();
             let mut stream: BytesStream = if package_url.scheme() == "file" {
                 let path = package_url.to_file_path().unwrap();
                 let file = tokio::fs::File::open(&path)
@@ -808,7 +807,6 @@ async fn mirror_subdir<T: Configurator>(
             .map_err(MirrorSubdirErrorKind::FailedToParseRepodata)
             .with_subdir(subdir)?
     };
-    println!("repodata size: {}", std::mem::size_of_val(&repodata));
     tracing::info!("Fetched repo data for subdir: {}", subdir);
 
     let builder = opendal_config.into_builder();
