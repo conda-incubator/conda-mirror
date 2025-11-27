@@ -403,10 +403,7 @@ fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<String, PackageRecord> {
-    let all_packages = repodata
-        .packages
-        .into_iter()
-        .chain(repodata.conda_packages.into_iter());
+    let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
     match config.mode.clone() {
         MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
