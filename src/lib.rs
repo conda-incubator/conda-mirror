@@ -1,4 +1,4 @@
-use futures::{StreamExt, lock::Mutex, stream::FuturesUnordered};
+use futures::{Stream, StreamExt, lock::Mutex, stream::FuturesUnordered};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
@@ -7,7 +7,7 @@ use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
     package::ArchiveType,
 };
-use rattler_digest::{Sha256Hash, compute_bytes_digest};
+use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
@@ -21,16 +21,22 @@ use reqwest_middleware::{
     reqwest::{self, Client},
 };
 use reqwest_retry::RetryTransientMiddleware;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env::current_dir,
     fmt,
     path::PathBuf,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tokio::{io::AsyncReadExt, sync::Semaphore, task::JoinError};
+use tokio::{fs::File, sync::Semaphore, task::JoinError};
+use tokio_util::{
+    bytes,
+    codec::{BytesCodec, FramedRead},
+};
 use tracing::info;
 use url::Url;
 
@@ -182,6 +188,8 @@ pub enum MirrorSubdirErrorKind {
     FailedToAddPackages(usize),
     #[error("task panicked: {0}")]
     JoinError(#[from] JoinError),
+    #[error("url parse error: {0}")]
+    UrlParseError(#[source] url::ParseError),
     #[error("failed to write repodata: {0}")]
     // https://github.com/conda/rattler/issues/1726
     WriteRepodata(#[source] anyhow::Error),
@@ -392,33 +400,54 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
 }
 
 fn get_packages_to_mirror(
-    repodata: &RepoData,
+    repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<String, PackageRecord> {
-    let mut all_packages = HashMap::new();
-    all_packages.extend(repodata.packages.clone());
-    all_packages.extend(repodata.conda_packages.clone());
+    let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
     match config.mode.clone() {
-        MirrorMode::All => all_packages.clone(),
+        MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| include.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::AllButExclude(exclude) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| !exclude.iter().any(|i| i.matches(&pkg.1)))
             .collect(),
         MirrorMode::IncludeExclude(include, exclude) => all_packages
-            .clone()
-            .into_iter()
             .filter(|pkg| {
                 !exclude
                     .iter()
                     .any(|i| i.matches(&pkg.1) || include.iter().any(|i| i.matches(&pkg.1)))
             })
             .collect(),
+    }
+}
+
+enum BytesStream {
+    File(PathBuf, FramedRead<File, BytesCodec>),
+    Reqwest(
+        Url,
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<tokio_util::bytes::Bytes, reqwest_middleware::reqwest::Error>,
+                    > + Send,
+            >,
+        >,
+    ),
+}
+
+impl BytesStream {
+    async fn next(&mut self) -> Option<Result<bytes::Bytes, MirrorPackageErrorKind>> {
+        match self {
+            BytesStream::File(path, stream) => stream.next().await.map(|bytes| {
+                bytes
+                    .map_err(|e| MirrorPackageErrorKind::FileRead(path.clone(), e))
+                    .map(|bytes| bytes.into())
+            }),
+            BytesStream::Reqwest(url, stream) => stream.next().await.map(|bytes| {
+                bytes.map_err(|e| MirrorPackageErrorKind::GetResponse(url.clone(), e))
+            }),
+        }
     }
 }
 
@@ -531,199 +560,216 @@ async fn dispatch_tasks_add(
     op: Operator,
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
 ) -> Result<(), MirrorSubdirErrorKind> {
-    if !packages_to_add.is_empty() {
-        let mut tasks = FuturesUnordered::new();
+    if packages_to_add.is_empty() {
+        return Ok(());
+    }
+    let mut tasks = FuturesUnordered::new();
 
-        let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
-        let sty = ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")
-            .unwrap()
-            .progress_chars("##-");
-        pb.set_style(sty);
+    let pb = Arc::new(progress.add(ProgressBar::new(packages_to_add.len() as u64)));
+    let sty = ProgressStyle::with_template("[{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}")
+        .unwrap()
+        .progress_chars("##-");
+    pb.set_style(sty);
 
-        let packages_to_add_len = packages_to_add.len();
+    let packages_to_add_len = packages_to_add.len();
 
+    let pb = pb.clone();
+    for (filename, package_record) in packages_to_add {
         let pb = pb.clone();
-        for (filename, package_record) in packages_to_add {
-            let pb = pb.clone();
-            let speed_tracker_bar = speed_tracker_bar.clone();
-            let semaphore = semaphore.clone();
-            let config = config.clone();
-            let client = client.clone();
-            let op = op.clone();
-            let task = async move {
-                let _permit = semaphore
-                    .acquire()
+        let speed_tracker_bar = speed_tracker_bar.clone();
+        let semaphore = semaphore.clone();
+        let client = client.clone();
+        let op = op.clone();
+        let package_url = config
+            .package_url(filename.as_str(), subdir)
+            .map_err(MirrorSubdirErrorKind::UrlParseError)?;
+        let task = async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("Semaphore was unexpectedly closed");
+
+            pb.set_message(format!(
+                "Mirroring {} {}",
+                subdir.as_str(),
+                console::style(&filename).dim()
+            ));
+
+            // use rattler client for downloading the package
+            let mut stream: BytesStream = if package_url.scheme() == "file" {
+                let path = package_url.to_file_path().unwrap();
+                let file = tokio::fs::File::open(&path)
                     .await
-                    .expect("Semaphore was unexpectedly closed");
-
-                pb.set_message(format!(
-                    "Mirroring {} {}",
-                    subdir.as_str(),
-                    console::style(&filename).dim()
-                ));
-
-                // use rattler client for downloading the package
-                let package_url = config
-                    .package_url(filename.as_str(), subdir)
-                    .map_err(MirrorPackageErrorKind::ParseUrl)
+                    .map_err(|e| MirrorPackageErrorKind::FileOpen(path.clone(), e))
                     .with_filename(&filename)?;
-                let mut buf = Vec::new();
-                if package_url.scheme() == "file" {
-                    let path = package_url.to_file_path().unwrap();
-                    let mut file = tokio::fs::File::open(&path)
-                        .await
-                        .map_err(|e| MirrorPackageErrorKind::FileOpen(path.clone(), e))
-                        .with_filename(&filename)?;
-                    file.read_to_end(&mut buf)
-                        .await
-                        .map_err(|e| MirrorPackageErrorKind::FileRead(path.clone(), e))
-                        .with_filename(&filename)?;
-                } else {
-                    let response = client
-                        .get(package_url.clone())
-                        .send()
-                        .await
-                        .map_err(|e| MirrorPackageErrorKind::SendRequest(package_url.clone(), e))
-                        .with_filename(&filename)?;
-                    if !response.status().is_success() {
-                        return Err(MirrorPackageErrorKind::UnsuccessfulFetch {
-                            status: response.status(),
-                            url: package_url,
-                        })
-                        .with_filename(&filename);
-                    }
-                    let bytes = response
-                        .bytes()
-                        .await
-                        .map_err(|e| MirrorPackageErrorKind::GetResponse(package_url, e))
-                        .with_filename(&filename)?;
-                    buf.extend_from_slice(&bytes);
-                };
-                tracing::debug!("Downloaded package {} with {} bytes", filename, buf.len());
-
-                // actual bytes downloaded
-                let actual_bytes = buf.len() as u64;
-
-                let expected_digest = package_record.sha256;
-                if let Some(expected_digest) = expected_digest {
-                    let digest: Sha256Hash = compute_bytes_digest::<sha2::Sha256>(&buf);
-                    if expected_digest != digest {
-                        return Err(MirrorPackageError {
-                            filename,
-                            source: Box::new(MirrorPackageErrorKind::InvalidDigest {
-                                expected: expected_digest,
-                                actual: digest,
-                            }),
-                        });
-                    }
-                    tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
-                } else {
-                    tracing::debug!(
-                        "No SHA256 digest found for {filename}, skipping verification."
-                    );
-                }
-
-                // Verify size from repodata when available.
-                if let Some(expected_size) = package_record.size
-                    && expected_size != actual_bytes
-                {
-                    return Err(MirrorPackageErrorKind::InvalidSize {
-                        expected: expected_size,
-                        actual: actual_bytes,
+                let read =
+                    tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new());
+                BytesStream::File(path, read)
+            } else {
+                let response = client
+                    .get(package_url.clone())
+                    .send()
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::SendRequest(package_url.clone(), e))
+                    .with_filename(&filename)?;
+                if !response.status().is_success() {
+                    return Err(MirrorPackageErrorKind::UnsuccessfulFetch {
+                        status: response.status(),
+                        url: package_url,
                     })
                     .with_filename(&filename);
                 }
-
-                // use opendal to upload the package
-                let destination_path = format!("{}/{}", subdir.as_str(), filename);
-                // TODO: Verify digest on S3 remote.
-                op.write(destination_path.as_str(), buf)
-                    .await
-                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
-                    .with_filename(&filename)?;
-                pb.inc(1);
-
-                let mut speed_bar_guard = speed_tracker_bar.lock().await;
-
-                // Update the total downloaded bytes
-                speed_bar_guard.downloaded_bytes += actual_bytes;
-
-                // Record current download in the speed tracker
-                speed_bar_guard.record(actual_bytes);
-
-                let avg_speed = speed_bar_guard.avg_speed();
-
-                let msg = if let Some(total_bytes) = speed_bar_guard.total_bytes {
-                    // If the total size of the download is known
-                    format!(
-                        "↕ {:.2} / {:.2} | {}",
-                        HumanBytes(speed_bar_guard.downloaded_bytes),
-                        HumanBytes(total_bytes),
-                        HumanBitsPerSecond(avg_speed),
-                    )
-                } else {
-                    // If total size is unknown, display only downloaded bytes and speed
-                    format!(
-                        "↕ {:.2} | {}",
-                        HumanBytes(speed_bar_guard.downloaded_bytes),
-                        HumanBitsPerSecond(avg_speed),
-                    )
-                };
-
-                speed_bar_guard.progress_bar.set_message(msg);
-                let res: Result<(), MirrorPackageError> = Ok(());
-                res
+                BytesStream::Reqwest(package_url, Box::pin(response.bytes_stream()))
             };
-            tasks.push(tokio::spawn(task));
-        }
 
-        let mut succeeded = Vec::new();
-        let mut failed = Vec::new();
-        while let Some(join_result) = tasks.next().await {
-            match join_result {
-                Ok(Ok(result)) => succeeded.push(result),
-                Ok(Err(e)) => {
-                    tracing::error!(
-                        "Failed to add package {subdir}/{}: {}",
-                        e.filename,
-                        e.source,
-                    );
-                    pb.inc(1);
-                    failed.push(e);
+            let mut hasher = Sha256::default();
+            let mut actual_bytes: u64 = 0;
+            let destination_path = format!("{}/{}", subdir.as_str(), filename);
+            let mut writer = op
+                .writer(destination_path.as_str())
+                .await
+                .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                .with_filename(&filename)?;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.with_filename(&filename)?;
+                hasher.update(&chunk);
+                actual_bytes += chunk.len() as u64;
+                writer
+                    .write(chunk)
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                    .with_filename(&filename)?;
+            }
+
+            tracing::debug!("Downloaded package {filename} with {actual_bytes} bytes");
+
+            let expected_digest = package_record.sha256;
+            let digest = hasher.finalize();
+            if let Some(expected_digest) = expected_digest {
+                if expected_digest != digest {
+                    writer
+                        .abort()
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                        .with_filename(&filename)?;
+                    return Err(MirrorPackageError {
+                        filename,
+                        source: Box::new(MirrorPackageErrorKind::InvalidDigest {
+                            expected: expected_digest,
+                            actual: digest,
+                        }),
+                    });
                 }
-                Err(join_err) => {
-                    tasks.clear();
-                    tracing::error!("Task panicked: {}", join_err);
-                    pb.abandon_with_message(format!(
-                        "{} {}",
-                        console::style("Failed to add packages in").red(),
-                        console::style(subdir.as_str()).dim()
-                    ));
-                    return Err(join_err.into());
-                }
+                tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
+            } else {
+                tracing::debug!("No SHA256 digest found for {filename}, skipping verification.");
+            }
+
+            // Verify size from repodata when available.
+            if let Some(expected_size) = package_record.size
+                && expected_size != actual_bytes
+            {
+                writer
+                    .abort()
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
+                    .with_filename(&filename)?;
+                return Err(MirrorPackageErrorKind::InvalidSize {
+                    expected: expected_size,
+                    actual: actual_bytes,
+                })
+                .with_filename(&filename);
+            }
+
+            // use opendal to upload the package
+            // TODO: Verify digest on S3 remote.
+            writer
+                .close()
+                .await
+                .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
+                .with_filename(&filename)?;
+            pb.inc(1);
+
+            let mut speed_bar_guard = speed_tracker_bar.lock().await;
+
+            // Update the total downloaded bytes
+            speed_bar_guard.downloaded_bytes += actual_bytes;
+
+            // Record current download in the speed tracker
+            speed_bar_guard.record(actual_bytes);
+
+            let avg_speed = speed_bar_guard.avg_speed();
+
+            let msg = if let Some(total_bytes) = speed_bar_guard.total_bytes {
+                // If the total size of the download is known
+                format!(
+                    "↕ {:.2} / {:.2} | {}",
+                    HumanBytes(speed_bar_guard.downloaded_bytes),
+                    HumanBytes(total_bytes),
+                    HumanBitsPerSecond(avg_speed),
+                )
+            } else {
+                // If total size is unknown, display only downloaded bytes and speed
+                format!(
+                    "↕ {:.2} | {}",
+                    HumanBytes(speed_bar_guard.downloaded_bytes),
+                    HumanBitsPerSecond(avg_speed),
+                )
+            };
+
+            speed_bar_guard.progress_bar.set_message(msg);
+            let res: Result<(), MirrorPackageError> = Ok(());
+            res
+        };
+        tasks.push(tokio::spawn(task));
+    }
+
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    while let Some(join_result) = tasks.next().await {
+        match join_result {
+            Ok(Ok(result)) => succeeded.push(result),
+            Ok(Err(e)) => {
+                tracing::error!(
+                    "Failed to add package {subdir}/{}: {}",
+                    e.filename,
+                    e.source,
+                );
+                pb.inc(1);
+                failed.push(e);
+            }
+            Err(join_err) => {
+                tasks.clear();
+                tracing::error!("Task panicked: {}", join_err);
+                pb.abandon_with_message(format!(
+                    "{} {}",
+                    console::style("Failed to add packages in").red(),
+                    console::style(subdir.as_str()).dim()
+                ));
+                return Err(join_err.into());
             }
         }
-        tracing::info!(
-            "Added {}/{} packages in subdir {}",
-            packages_to_add_len - failed.len(),
-            packages_to_add_len,
-            subdir.as_str()
-        );
-        if failed.is_empty() {
-            pb.finish_with_message(format!(
-                "{} {}",
-                console::style("Finished adding packages in").green(),
-                console::style(subdir.as_str()).bold()
-            ));
-        } else {
-            pb.abandon_with_message(format!(
-                "{} {} with {} failures",
-                console::style("Finished adding packages in").red(),
-                console::style(subdir.as_str()).bold(),
-                failed.len()
-            ));
-            return Err(MirrorSubdirErrorKind::FailedToAddPackages(failed.len()));
-        }
+    }
+    tracing::info!(
+        "Added {}/{} packages in subdir {}",
+        packages_to_add_len - failed.len(),
+        packages_to_add_len,
+        subdir.as_str()
+    );
+    if failed.is_empty() {
+        pb.finish_with_message(format!(
+            "{} {}",
+            console::style("Finished adding packages in").green(),
+            console::style(subdir.as_str()).bold()
+        ));
+    } else {
+        pb.abandon_with_message(format!(
+            "{} {} with {} failures",
+            console::style("Finished adding packages in").red(),
+            console::style(subdir.as_str()).bold(),
+            failed.len()
+        ));
+        return Err(MirrorSubdirErrorKind::FailedToAddPackages(failed.len()));
     }
     Ok(())
 }
@@ -793,7 +839,10 @@ async fn mirror_subdir<T: Configurator>(
         })
         .collect::<HashSet<_>>();
 
-    let packages_to_mirror = get_packages_to_mirror(&repodata, &config);
+    let repodata_info = repodata.info.clone();
+    let repodata_version = repodata.version;
+    let repodata_removed = repodata.removed.clone();
+    let packages_to_mirror = get_packages_to_mirror(repodata, &config);
     tracing::info!(
         "Mirroring {} packages in {}",
         packages_to_mirror.len(),
@@ -882,11 +931,11 @@ async fn mirror_subdir<T: Configurator>(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let new_repodata = RepoData {
-        info: repodata.info,
+        info: repodata_info,
         packages,
         conda_packages,
-        removed: repodata.removed,
-        version: repodata.version,
+        removed: repodata_removed,
+        version: repodata_version,
     };
     let metadata =
         RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
