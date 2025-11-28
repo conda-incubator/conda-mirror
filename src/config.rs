@@ -96,7 +96,7 @@ pub struct CliConfig {
     #[command(flatten)]
     pub verbose: Verbosity,
 
-    /// Enable precondition check when uploading repodata files.
+    /// Enable precondition checks when uploading repodata files.
     #[arg(long)]
     pub precondition_checks: Option<bool>,
 }
