@@ -150,6 +150,7 @@ subdirs:
 
 When using S3, you need to configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.
 You can either set these by using the appropriate CLI flags or by using a configuration file.
+You can set `s3-precondition-check` to `true` or `false` to enable or disable precondition checks when uploading the repodata to the destination. Defaults to `true`.
 
 ```yml
 source: s3://my-source-channel
@@ -164,6 +165,8 @@ s3-config:
     endpoint-url: https://s3.eu-central-1.amazonaws.com
     force-path-style: false
     region: eu-central-1
+
+s3-precondition-check: true
 ```
 
 See [pixi's documentation](https://pixi.sh/latest/deployment/s3/#s3-compatible-storage) for configuring S3-compatible storage like Cloudflare R2 or Hetzner Object Storage.
