@@ -553,7 +553,7 @@ async fn dispatch_tasks_delete(
 async fn dispatch_tasks_add(
     packages_to_add: HashMap<String, PackageRecord>,
     subdir: Platform,
-    config: CondaMirrorConfig,
+    config: &CondaMirrorConfig,
     client: ClientWithMiddleware,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
@@ -893,7 +893,7 @@ async fn mirror_subdir<T: Configurator>(
     dispatch_tasks_add(
         packages_to_add,
         subdir,
-        config,
+        &config,
         client,
         progress.clone(),
         semaphore.clone(),
@@ -937,8 +937,13 @@ async fn mirror_subdir<T: Configurator>(
         removed: repodata_removed,
         version: repodata_version,
     };
+    let precondition_checks = if config.precondition_checks {
+        PreconditionChecks::Enabled
+    } else {
+        PreconditionChecks::Disabled
+    };
     let metadata =
-        RepodataMetadataCollection::new(&op, subdir, true, true, true, PreconditionChecks::Enabled)
+        RepodataMetadataCollection::new(&op, subdir, true, true, true, precondition_checks)
             .await
             .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
             .with_subdir(subdir)?;

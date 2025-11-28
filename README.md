@@ -166,7 +166,7 @@ s3-config:
     force-path-style: false
     region: eu-central-1
 
-s3-precondition-check: true
+precondition-checks: true
 ```
 
 See [pixi's documentation](https://pixi.sh/latest/deployment/s3/#s3-compatible-storage) for configuring S3-compatible storage like Cloudflare R2 or Hetzner Object Storage.
