@@ -95,6 +95,10 @@ pub struct CliConfig {
     // todo: add --force option
     #[command(flatten)]
     pub verbose: Verbosity,
+
+    /// Enable precondition checks when uploading repodata files.
+    #[arg(long)]
+    pub precondition_checks: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -176,6 +180,7 @@ pub struct CondaMirrorYamlConfig {
     pub include: Option<Vec<MatchSpecWrapper>>,
     pub exclude: Option<Vec<MatchSpecWrapper>>,
     pub s3_config: Option<S3ConfigSourceDest>,
+    pub precondition_checks: Option<bool>,
 }
 
 /* -------------------------------------------- CONFIG ------------------------------------------- */
@@ -207,6 +212,7 @@ pub struct CondaMirrorConfig {
     pub s3_credentials_source: Option<S3Credentials>,
     pub s3_credentials_destination: Option<S3Credentials>,
     pub channel_source: Channel,
+    pub precondition_checks: bool,
 }
 
 impl CondaMirrorConfig {
@@ -224,6 +230,7 @@ impl CondaMirrorConfig {
         s3_config_destination: Option<S3Config>,
         s3_credentials_source: Option<S3Credentials>,
         s3_credentials_destination: Option<S3Credentials>,
+        precondition_checks: bool,
     ) -> miette::Result<Self> {
         let channel_source = source
             .clone()
@@ -244,6 +251,7 @@ impl CondaMirrorConfig {
             s3_credentials_source,
             s3_credentials_destination,
             channel_source,
+            precondition_checks,
         })
     }
 
