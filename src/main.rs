@@ -63,6 +63,11 @@ async fn main() -> miette::Result<()> {
         cli_config.max_parallel
     };
 
+    let precondition_checks = cli_config
+        .precondition_checks
+        .or(yaml_config.precondition_checks)
+        .unwrap_or(true);
+
     let mode = match (yaml_config.include, yaml_config.exclude) {
         (Some(include), Some(exclude)) => MirrorMode::IncludeExclude(
             include.into_iter().map(|spec| spec.0).collect(),
@@ -161,6 +166,7 @@ async fn main() -> miette::Result<()> {
         s3_config_destination,
         s3_credentials_source,
         s3_credentials_destination,
+        precondition_checks,
     )?;
 
     tracing::info!("Using configuration: {:?}", config);
