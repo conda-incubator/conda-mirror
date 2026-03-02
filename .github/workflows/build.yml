@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: Quantco/ui-actions/version-metadata@cd71d2a0e30b25569f6d723e57acca83347e58fc # v1.0.18
+      - uses: Quantco/ui-actions/version-metadata@adeb1cf49655487534b4ddaab09c3b7bdfd1d628 # v1.0.19
         id: version-metadata
         with:
           file: ./Cargo.toml
@@ -70,7 +70,7 @@ jobs:
           mv target/${{ matrix.target }}/${{ needs.metadata.outputs.optimize-build && 'release-min-size' || 'release' }}/conda-mirror${{ endsWith(matrix.target, 'windows-msvc') && '.exe' || '' }} conda-mirror-${{ matrix.target }}${{ endsWith(matrix.target, 'windows-msvc') && '.exe' || '' }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: conda-mirror-${{ matrix.target }}
           path: conda-mirror-${{ matrix.target }}${{ endsWith(matrix.target, 'windows-msvc') && '.exe' || '' }}
@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Download artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           pattern: conda-mirror-*
           merge-multiple: true
