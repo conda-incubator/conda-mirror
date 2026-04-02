@@ -4,8 +4,7 @@ use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
-    ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
-    package::ArchiveType,
+    ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};

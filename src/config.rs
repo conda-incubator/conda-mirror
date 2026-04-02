@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
-    Channel, ChannelConfig, Matches, MatchSpec, NamedChannelOrUrl, PackageRecord, ParseStrictness,
+    Channel, ChannelConfig, MatchSpec, Matches, NamedChannelOrUrl, PackageRecord, ParseStrictness,
     ParseStrictnessWithNameMatcher, Platform,
 };
 use serde::{Deserialize, Deserializer};
@@ -138,10 +138,10 @@ pub fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
     }
 
     // Try date-only format YYYY-MM-DD (treat as midnight UTC)
-    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        if let Some(dt) = date.and_hms_opt(0, 0, 0) {
-            return Ok(dt.and_utc());
-        }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(dt.and_utc());
     }
 
     // Try relative duration suffix: e.g. "14d" = 14 days ago
@@ -204,15 +204,15 @@ impl PackageFilter {
             return false;
         }
         if let Some(ref ts) = pkg.timestamp {
-            if let Some(ref exclude_newer) = self.exclude_newer {
-                if ts > exclude_newer {
-                    return false;
-                }
+            if let Some(ref exclude_newer) = self.exclude_newer
+                && ts > exclude_newer
+            {
+                return false;
             }
-            if let Some(ref exclude_older) = self.exclude_older {
-                if ts < exclude_older {
-                    return false;
-                }
+            if let Some(ref exclude_older) = self.exclude_older
+                && ts < exclude_older
+            {
+                return false;
             }
         }
         true
