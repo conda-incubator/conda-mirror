@@ -5,14 +5,13 @@ use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
-    package::ArchiveType,
+    package::{CondaArchiveType, DistArchiveIdentifier},
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
-    retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
 use reqwest::StatusCode;
@@ -21,6 +20,7 @@ use reqwest_middleware::{
     reqwest::{self, Client},
 };
 use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -403,7 +403,11 @@ fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<String, PackageRecord> {
-    let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
+    let all_packages = repodata
+        .packages
+        .into_iter()
+        .chain(repodata.conda_packages)
+        .map(|(k, v)| (k.to_string(), v));
     match config.mode.clone() {
         MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
@@ -832,7 +836,7 @@ async fn mirror_subdir<T: Configurator>(
         .filter_map(|entry| {
             if entry.metadata().mode().is_file() {
                 let filename = entry.name().to_string();
-                ArchiveType::try_from(&filename).map(|_| filename)
+                CondaArchiveType::try_from(&filename).map(|_| filename)
             } else {
                 None
             }
@@ -907,28 +911,40 @@ async fn mirror_subdir<T: Configurator>(
     let packages = packages_to_mirror
         .iter()
         .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => true,
-                Some(ArchiveType::Conda) => false,
+            |(filename, _)| match CondaArchiveType::try_from(filename.as_str()) {
+                Some(CondaArchiveType::TarBz2) => true,
+                Some(CondaArchiveType::Conda) => false,
                 None => {
                     unreachable!("Packages in repodata are always either Conda or TarBz2")
                 }
             },
         )
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            (
+                k.parse::<DistArchiveIdentifier>()
+                    .expect("filename was parsed from repodata"),
+                v.clone(),
+            )
+        })
         .collect();
     let conda_packages = packages_to_mirror
         .iter()
         .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => false,
-                Some(ArchiveType::Conda) => true,
+            |(filename, _)| match CondaArchiveType::try_from(filename.as_str()) {
+                Some(CondaArchiveType::TarBz2) => false,
+                Some(CondaArchiveType::Conda) => true,
                 None => {
                     unreachable!("Packages in repodata are always either Conda or TarBz2")
                 }
             },
         )
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            (
+                k.parse::<DistArchiveIdentifier>()
+                    .expect("filename was parsed from repodata"),
+                v.clone(),
+            )
+        })
         .collect();
     let new_repodata = RepoData {
         info: repodata_info,
@@ -936,6 +952,7 @@ async fn mirror_subdir<T: Configurator>(
         conda_packages,
         removed: repodata_removed,
         version: repodata_version,
+        experimental_v3: Default::default(),
     };
     let precondition_checks = if config.precondition_checks {
         PreconditionChecks::Enabled
@@ -949,7 +966,7 @@ async fn mirror_subdir<T: Configurator>(
             .with_subdir(subdir)?;
     write_repodata(new_repodata, None, subdir, op, &metadata)
         .await
-        .map_err(MirrorSubdirErrorKind::WriteRepodata)
+        .map_err(|e| MirrorSubdirErrorKind::WriteRepodata(anyhow::anyhow!(e)))
         .with_subdir(subdir)?;
     // todo: check if non-conda and non-repodata files exist, print warning if any
     Ok(())
