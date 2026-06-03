@@ -36,7 +36,7 @@ jobs:
         with:
           token: ${{ steps.octo-sts.outputs.token }}
           commit-message: Update pixi lockfile
-          title: Update pixi lockfile
+          title: "chore: Update pixi lockfile"
           body-path: diff.md
           branch: update-pixi
           base: main
