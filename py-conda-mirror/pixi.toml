@@ -1,0 +1,41 @@
+[workspace]
+name = "py-conda-mirror"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+license = "BSD-3-Clause"
+preview = ["pixi-build"]
+build-variants = { python = ["3.10"] }
+
+[package.build]
+backend = { name = "pixi-build-python", version = "*" }
+
+[package.build.config]
+compilers = ["rust"]
+
+[package.host-dependencies]
+python = "*"
+maturin = ">=1,<2"
+
+[feature.lint.dependencies]
+# cargo-fmt and clippy
+rust = "*"
+ruff = "*"
+
+[feature.lint.tasks]
+fmt = { depends-on = ["fmt-python", "fmt-rust"] }
+fmt-python = "ruff format"
+fmt-rust = "cargo fmt --all"
+fmt-check = { depends-on = ["fmt-python-check", "fmt-rust-check"] }
+fmt-rust-check = "cargo fmt --all --check"
+fmt-python-check = "ruff format --diff"
+
+lint = { depends-on = ["lint-python", "lint-rust"] }
+lint-python = "ruff check"
+lint-rust = "cargo clippy --all"
+
+[feature.test.dependencies]
+py-conda-mirror = { path = "." }
+pytest = "*"
+
+[environments]
+default = ["lint", "test"]
