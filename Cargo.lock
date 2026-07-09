@@ -1045,6 +1045,7 @@ version = "0.12.1"
 dependencies = [
  "anyhow",
  "bytes",
+ "chrono",
  "clap",
  "clap-verbosity-flag",
  "console",

@@ -69,16 +69,9 @@ async fn main() -> miette::Result<()> {
         .unwrap_or(true);
 
     let mode = match (yaml_config.include, yaml_config.exclude) {
-        (Some(include), Some(exclude)) => MirrorMode::IncludeExclude(
-            include.into_iter().map(|spec| spec.0).collect(),
-            exclude.into_iter().map(|spec| spec.0).collect(),
-        ),
-        (Some(include), None) => {
-            MirrorMode::OnlyInclude(include.into_iter().map(|spec| spec.0).collect())
-        }
-        (None, Some(exclude)) => {
-            MirrorMode::AllButExclude(exclude.into_iter().map(|spec| spec.0).collect())
-        }
+        (Some(include), Some(exclude)) => MirrorMode::IncludeExclude(include, exclude),
+        (Some(include), None) => MirrorMode::OnlyInclude(include),
+        (None, Some(exclude)) => MirrorMode::AllButExclude(exclude),
         (None, None) => MirrorMode::All,
     };
 

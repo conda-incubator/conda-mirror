@@ -1,0 +1,15 @@
+source: conda-forge
+destination: ./conda-forge-fs-mirror
+
+# Mirror only Python packages built between 2023 and 2025.
+# The plain-string form and the object form can be mixed freely.
+include:
+  # Plain string MatchSpec (no timestamp bounds)
+  - "jupyter*[license=MIT]"
+  # Object form with timestamp bounds
+  - matchspec: "python*"
+    exclude-newer: "2025-10-01T00:00:00Z"
+    exclude-older: "2023-01-01"
+  # Relative bound: exclude packages built more than 90 days ago
+  - matchspec: "numpy*"
+    exclude-older: "90d"
