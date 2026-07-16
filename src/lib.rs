@@ -5,9 +5,8 @@ use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
-    package::ArchiveType,
+    package::{CondaArchiveType, DistArchiveIdentifier},
 };
-use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
     Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
@@ -125,11 +124,8 @@ pub enum MirrorPackageErrorKind {
     SendRequest(Url, #[source] reqwest_middleware::Error),
     #[error("failed to get response from {0}: {1}")]
     GetResponse(Url, #[source] reqwest::Error),
-    #[error("invalid digest: {expected:x} (expected) != {actual:x} (actual)")]
-    InvalidDigest {
-        expected: Sha256Hash,
-        actual: Sha256Hash,
-    },
+    #[error("invalid digest: {expected} (expected) != {actual} (actual)")]
+    InvalidDigest { expected: String, actual: String },
     #[error("invalid size: expected {expected} bytes, got {actual} bytes")]
     InvalidSize { expected: u64, actual: u64 },
     #[error("failed upload to {0}: {1}")]
@@ -191,8 +187,7 @@ pub enum MirrorSubdirErrorKind {
     #[error("url parse error: {0}")]
     UrlParseError(#[source] url::ParseError),
     #[error("failed to write repodata: {0}")]
-    // https://github.com/conda/rattler/issues/1726
-    WriteRepodata(#[source] anyhow::Error),
+    WriteRepodata(#[source] rattler_index::error::RepodataError),
 }
 
 #[derive(Debug, Error)]
@@ -403,7 +398,11 @@ fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<String, PackageRecord> {
-    let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
+    let all_packages = repodata
+        .packages
+        .into_iter()
+        .chain(repodata.conda_packages)
+        .map(|(identifier, record)| (identifier.to_file_name(), record));
     match config.mode.clone() {
         MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
@@ -655,12 +654,15 @@ async fn dispatch_tasks_add(
                     return Err(MirrorPackageError {
                         filename,
                         source: Box::new(MirrorPackageErrorKind::InvalidDigest {
-                            expected: expected_digest,
-                            actual: digest,
+                            expected: hex::encode(expected_digest),
+                            actual: hex::encode(digest),
                         }),
                     });
                 }
-                tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
+                tracing::debug!(
+                    "Verified SHA256 of {filename}: {}",
+                    hex::encode(expected_digest)
+                );
             } else {
                 tracing::debug!("No SHA256 digest found for {filename}, skipping verification.");
             }
@@ -832,7 +834,7 @@ async fn mirror_subdir<T: Configurator>(
         .filter_map(|entry| {
             if entry.metadata().mode().is_file() {
                 let filename = entry.name().to_string();
-                ArchiveType::try_from(&filename).map(|_| filename)
+                CondaArchiveType::try_from(&filename).map(|_| filename)
             } else {
                 None
             }
@@ -907,33 +909,46 @@ async fn mirror_subdir<T: Configurator>(
     let packages = packages_to_mirror
         .iter()
         .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => true,
-                Some(ArchiveType::Conda) => false,
+            |(filename, _)| match CondaArchiveType::try_from(filename.as_str()) {
+                Some(CondaArchiveType::TarBz2) => true,
+                Some(CondaArchiveType::Conda) => false,
                 None => {
                     unreachable!("Packages in repodata are always either Conda or TarBz2")
                 }
             },
         )
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            (
+                DistArchiveIdentifier::try_from_filename(k)
+                    .expect("packages in repodata have valid filenames"),
+                v.clone(),
+            )
+        })
         .collect();
     let conda_packages = packages_to_mirror
         .iter()
         .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => false,
-                Some(ArchiveType::Conda) => true,
+            |(filename, _)| match CondaArchiveType::try_from(filename.as_str()) {
+                Some(CondaArchiveType::TarBz2) => false,
+                Some(CondaArchiveType::Conda) => true,
                 None => {
                     unreachable!("Packages in repodata are always either Conda or TarBz2")
                 }
             },
         )
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            (
+                DistArchiveIdentifier::try_from_filename(k)
+                    .expect("packages in repodata have valid filenames"),
+                v.clone(),
+            )
+        })
         .collect();
     let new_repodata = RepoData {
         info: repodata_info,
         packages,
         conda_packages,
+        v3: Default::default(),
         removed: repodata_removed,
         version: repodata_version,
     };
