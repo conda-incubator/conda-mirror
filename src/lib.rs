@@ -4,8 +4,7 @@ use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
-    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
-    package::ArchiveType,
+    ChannelConfig, NamedChannelOrUrl, PackageRecord, Platform, RepoData, package::ArchiveType,
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
@@ -407,16 +406,15 @@ fn get_packages_to_mirror(
     match config.mode.clone() {
         MirrorMode::All => all_packages.collect(),
         MirrorMode::OnlyInclude(include) => all_packages
-            .filter(|pkg| include.iter().any(|i| i.matches(&pkg.1)))
+            .filter(|pkg| include.iter().any(|f| f.matches(&pkg.1)))
             .collect(),
         MirrorMode::AllButExclude(exclude) => all_packages
-            .filter(|pkg| !exclude.iter().any(|i| i.matches(&pkg.1)))
+            .filter(|pkg| !exclude.iter().any(|f| f.matches(&pkg.1)))
             .collect(),
         MirrorMode::IncludeExclude(include, exclude) => all_packages
             .filter(|pkg| {
-                !exclude
-                    .iter()
-                    .any(|i| i.matches(&pkg.1) || include.iter().any(|i| i.matches(&pkg.1)))
+                include.iter().any(|f| f.matches(&pkg.1))
+                    || !exclude.iter().any(|f| f.matches(&pkg.1))
             })
             .collect(),
     }

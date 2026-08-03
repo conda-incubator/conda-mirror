@@ -23,6 +23,7 @@ rustls-tls = [
 # https://github.com/conda/rattler/issues/1726
 anyhow = "1.0.100"
 bytes = "1.11.1"
+chrono = "0.4"
 clap = { version = "4.5.51", features = ["derive", "string", "env"] }
 clap-verbosity-flag = { version = "3.0.4", features = ["tracing"] }
 console = "0.16.1"
