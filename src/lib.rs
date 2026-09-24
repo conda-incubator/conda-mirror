@@ -5,7 +5,7 @@ use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
-    package::ArchiveType,
+    package::{CondaArchiveType, DistArchiveIdentifier, DistArchiveType},
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
@@ -128,7 +128,7 @@ pub enum MirrorPackageErrorKind {
     SendRequest(Url, #[source] reqwest_middleware::Error),
     #[error("failed to get response from {0}: {1}")]
     GetResponse(Url, #[source] reqwest::Error),
-    #[error("invalid digest: {expected:x} (expected) != {actual:x} (actual)")]
+    #[error("invalid digest: {} (expected) != {} (actual)", hex::encode(.expected), hex::encode(.actual))]
     InvalidDigest {
         expected: Sha256Hash,
         actual: Sha256Hash,
@@ -194,8 +194,7 @@ pub enum MirrorSubdirErrorKind {
     #[error("url parse error: {0}")]
     UrlParseError(#[source] url::ParseError),
     #[error("failed to write repodata: {0}")]
-    // https://github.com/conda/rattler/issues/1726
-    WriteRepodata(#[source] anyhow::Error),
+    WriteRepodata(#[source] rattler_index::error::RepodataError),
 }
 
 #[derive(Debug, Error)]
@@ -389,7 +388,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
 fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
-) -> HashMap<String, PackageRecord> {
+) -> HashMap<DistArchiveIdentifier, PackageRecord> {
     let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
     match config.mode.clone() {
         MirrorMode::All => all_packages.collect(),
@@ -647,7 +646,10 @@ async fn dispatch_tasks_add(
                         }),
                     });
                 }
-                tracing::debug!("Verified SHA256 of {filename}: {expected_digest:x}");
+                tracing::debug!(
+                    "Verified SHA256 of {filename}: {}",
+                    hex::encode(expected_digest)
+                );
             } else {
                 tracing::debug!("No SHA256 digest found for {filename}, skipping verification.");
             }
@@ -819,7 +821,7 @@ async fn mirror_subdir<T: Configurator>(
         .filter_map(|entry| {
             if entry.metadata().mode().is_file() {
                 let filename = entry.name().to_string();
-                ArchiveType::try_from(&filename).map(|_| filename)
+                CondaArchiveType::try_from(&filename).map(|_| filename)
             } else {
                 None
             }
@@ -829,19 +831,31 @@ async fn mirror_subdir<T: Configurator>(
     let repodata_info = repodata.info.clone();
     let repodata_version = repodata.version;
     let repodata_removed = repodata.removed.clone();
+    if !repodata.v3.is_empty() {
+        // TODO: mirror the packages under the `v3` key as well.
+        tracing::warn!(
+            "Ignoring {} packages under the `v3` key of the repodata of {subdir}",
+            repodata.v3.records().count()
+        );
+    }
     let packages_to_mirror = get_packages_to_mirror(repodata, &config);
     tracing::info!(
         "Mirroring {} packages in {}",
         packages_to_mirror.len(),
         subdir,
     );
+    let filenames_to_mirror = packages_to_mirror
+        .keys()
+        .map(DistArchiveIdentifier::to_file_name)
+        .collect::<HashSet<_>>();
     let packages_to_delete = available_packages
-        .difference(&packages_to_mirror.keys().cloned().collect::<HashSet<_>>())
+        .difference(&filenames_to_mirror)
         .cloned()
         .collect::<Vec<_>>();
     let mut packages_to_add = HashMap::new();
     let mut subdir_size_to_add = Some(0);
-    for (filename, package) in packages_to_mirror.clone() {
+    for (identifier, package) in packages_to_mirror.clone() {
+        let filename = identifier.to_file_name();
         if !available_packages.contains(&filename) {
             if let Some(size) = package.size {
                 if let Some(current) = subdir_size_to_add {
@@ -893,34 +907,31 @@ async fn mirror_subdir<T: Configurator>(
     /* ---------------------------- WRITE REPODATA ---------------------------- */
     let packages = packages_to_mirror
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => true,
-                Some(ArchiveType::Conda) => false,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
+        .filter(|(identifier, _)| match identifier.archive_type {
+            DistArchiveType::Conda(CondaArchiveType::TarBz2) => true,
+            DistArchiveType::Conda(CondaArchiveType::Conda) => false,
+            DistArchiveType::Wheel(_) => {
+                unreachable!("Packages in repodata are always either Conda or TarBz2")
+            }
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let conda_packages = packages_to_mirror
         .iter()
-        .filter(
-            |(filename, _)| match ArchiveType::try_from(filename.as_str()) {
-                Some(ArchiveType::TarBz2) => false,
-                Some(ArchiveType::Conda) => true,
-                None => {
-                    unreachable!("Packages in repodata are always either Conda or TarBz2")
-                }
-            },
-        )
+        .filter(|(identifier, _)| match identifier.archive_type {
+            DistArchiveType::Conda(CondaArchiveType::TarBz2) => false,
+            DistArchiveType::Conda(CondaArchiveType::Conda) => true,
+            DistArchiveType::Wheel(_) => {
+                unreachable!("Packages in repodata are always either Conda or TarBz2")
+            }
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let new_repodata = RepoData {
         info: repodata_info,
         packages,
         conda_packages,
+        v3: Default::default(),
         removed: repodata_removed,
         version: repodata_version,
     };
