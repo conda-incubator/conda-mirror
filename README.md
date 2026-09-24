@@ -171,20 +171,17 @@ precondition-checks: true
 
 See [pixi's documentation](https://pixi.sh/latest/deployment/s3/#s3-compatible-storage) for configuring S3-compatible storage like Cloudflare R2 or Hetzner Object Storage.
 
-Every setting is optional and everything that isn't set explicitly is resolved through the AWS SDK.
-For plain AWS S3, no `s3-config` is needed at all:
+The S3 settings are all-or-nothing: either you configure all of them for a side of the mirror, or you configure none of them and everything is resolved through the AWS SDK instead.
+The latter is what you want for plain AWS S3, where no `s3-config` is needed at all:
 
 ```yml
 source: conda-forge
 destination: s3://my-destination-bucket/my-channel
 ```
 
-Credentials are resolved in this order, separately for the source and the destination:
-
-1. the `--s3-access-key-id-*` / `--s3-secret-access-key-*` / `--s3-session-token-*` flags (or their `S3_*_SOURCE` / `S3_*_DESTINATION` environment variables)
-2. the credentials stored by `pixi auth login` for the bucket
-3. the AWS SDK, which covers `AWS_ACCESS_KEY_ID` and friends, `~/.aws/config` profiles (including SSO), and instance metadata
-
-The endpoint URL, the region, and the addressing style fall back to the AWS configuration as well (`AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_PROFILE`, ...).
+The AWS SDK resolves the endpoint URL, the region and the credentials the same way the `aws` CLI does, so `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` and friends, `~/.aws/config` profiles (including SSO), and instance metadata all work.
 When using AWS SSO, make sure the session is active by running `aws sso login` before mirroring.
+
+If you do set the S3 settings explicitly, the credentials have to come from either the `--s3-access-key-id-*` / `--s3-secret-access-key-*` / `--s3-session-token-*` flags (or their `S3_*_SOURCE` / `S3_*_DESTINATION` environment variables) or from the credentials stored by `pixi auth login` for the bucket.
+
 Note that credentials are resolved once when `conda-mirror` starts, so temporary credentials that expire during a long mirror run are not refreshed.
