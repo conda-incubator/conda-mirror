@@ -1159,7 +1159,7 @@ checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "conda-mirror"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-reqwest-retry",
