@@ -1,0 +1,22 @@
+[package]
+name = "py-conda-mirror"
+version = "0.11.4"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "conda_mirror"
+crate-type = ["cdylib"]
+
+[features]
+default = ["rustls-tls"]
+native-tls = ["conda-mirror/native-tls"]
+rustls-tls = ["conda-mirror/rustls-tls"]
+
+[dependencies]
+conda-mirror = { path = "../" }
+pyo3 = { version = "0.26.0", features = ["abi3-py310"] }
+
+[build-dependencies]
+pyo3-build-config = "0.26.0"
