@@ -1078,6 +1078,7 @@ dependencies = [
  "rattler_index",
  "rattler_networking",
  "rattler_repodata_gateway",
+ "rattler_s3",
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",

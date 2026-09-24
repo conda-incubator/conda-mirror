@@ -40,28 +40,28 @@ pub struct CliConfig {
     #[arg(long, default_value_t = 32)]
     pub max_parallel: u8,
 
-    /// The S3 endpoint URL.
-    #[arg(long, requires_all = ["s3_region_source", "s3_force_path_style_source"])]
+    /// The S3 endpoint URL. Resolved through the AWS SDK if not set.
+    #[arg(long)]
     pub s3_endpoint_url_source: Option<Url>,
 
-    /// The S3 region.
-    #[arg(long, requires_all = ["s3_endpoint_url_source", "s3_force_path_style_source"])]
+    /// The S3 region. Resolved through the AWS SDK if not set.
+    #[arg(long)]
     pub s3_region_source: Option<String>,
 
     /// Whether to use path style or not in S3 requests.
-    #[arg(long, requires_all = ["s3_endpoint_url_source", "s3_region_source"])]
+    #[arg(long)]
     pub s3_force_path_style_source: Option<bool>,
 
-    /// The S3 endpoint URL.
-    #[arg(long, requires_all = ["s3_region_destination", "s3_force_path_style_destination"])]
+    /// The S3 endpoint URL. Resolved through the AWS SDK if not set.
+    #[arg(long)]
     pub s3_endpoint_url_destination: Option<Url>,
 
-    /// The S3 region.
-    #[arg(long, requires_all = ["s3_endpoint_url_destination", "s3_force_path_style_destination"])]
+    /// The S3 region. Resolved through the AWS SDK if not set.
+    #[arg(long)]
     pub s3_region_destination: Option<String>,
 
     /// Whether to use path style or not in S3 requests.
-    #[arg(long, requires_all = ["s3_endpoint_url_destination", "s3_region_destination"])]
+    #[arg(long)]
     pub s3_force_path_style_destination: Option<bool>,
 
     /// The access key ID for the S3 bucket.
@@ -151,12 +151,32 @@ impl<'de> Deserialize<'de> for MatchSpecWrapper {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+/// The S3 settings for one side of the mirror.
+///
+/// Every field is optional: whatever is not set here is resolved through the
+/// AWS SDK (environment variables, `~/.aws/config`, SSO, instance metadata, ...).
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct S3Config {
-    pub endpoint_url: Url,
-    pub region: String,
-    pub force_path_style: bool,
+    pub endpoint_url: Option<Url>,
+    pub region: Option<String>,
+    pub force_path_style: Option<bool>,
+}
+
+impl S3Config {
+    /// Whether none of the settings are set.
+    pub fn is_empty(&self) -> bool {
+        self.endpoint_url.is_none() && self.region.is_none() && self.force_path_style.is_none()
+    }
+
+    /// Merge two configurations, preferring the values of `self`.
+    pub fn merge(self, other: S3Config) -> S3Config {
+        S3Config {
+            endpoint_url: self.endpoint_url.or(other.endpoint_url),
+            region: self.region.or(other.region),
+            force_path_style: self.force_path_style.or(other.force_path_style),
+        }
+    }
 }
 
 // TODO: allow setting it in .s3-config globally for both source and dest

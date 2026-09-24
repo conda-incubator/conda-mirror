@@ -15,6 +15,7 @@ use rattler_networking::{
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
+use rattler_s3::S3AddressingStyle;
 use reqwest::StatusCode;
 use reqwest_middleware::{
     ClientBuilder, ClientWithMiddleware,
@@ -41,7 +42,9 @@ use tracing::info;
 use url::Url;
 
 pub mod config;
+mod s3;
 use config::{CondaMirrorConfig, MirrorMode};
+use s3::resolve_s3_credentials;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -220,7 +223,7 @@ where
 }
 
 pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
-    let client = get_client(&config)?;
+    let client = get_client(&config).await?;
 
     let channel_config = ChannelConfig::default_with_root_dir(current_dir().into_diagnostic()?);
     let dest_channel = config
@@ -243,47 +246,31 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
             OpenDALConfigurator::File(config)
         }
         "s3" => {
-            let s3_config = config
-                .s3_config_destination
-                .clone()
-                .ok_or(miette::miette!("No S3 destination config set"))?;
+            let auth_storage = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
+            let credentials = resolve_s3_credentials(
+                dest_channel_url,
+                config.s3_config_destination.as_ref(),
+                config.s3_credentials_destination.as_ref(),
+                &auth_storage,
+            )
+            .await?;
+
             let mut opendal_s3_config = opendal::services::S3Config::default();
             opendal_s3_config.root = Some(dest_channel_url.path().to_string());
             opendal_s3_config.bucket = dest_channel_url
                 .host_str()
                 .ok_or(miette::miette!("No bucket in S3 URL"))?
                 .to_string();
-            opendal_s3_config.region = Some(s3_config.region);
-            opendal_s3_config.endpoint = Some(s3_config.endpoint_url.to_string());
-            opendal_s3_config.enable_virtual_host_style = !s3_config.force_path_style;
-            // Use credentials from the CLI if they are provided.
-            if let Some(s3_credentials) = config.s3_credentials_destination.clone() {
-                opendal_s3_config.secret_access_key = Some(s3_credentials.secret_access_key);
-                opendal_s3_config.access_key_id = Some(s3_credentials.access_key_id);
-                opendal_s3_config.session_token = s3_credentials.session_token;
-            } else {
-                // If they're not provided, check rattler authentication storage for credentials.
-                let auth_storage =
-                    AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-                let auth = auth_storage
-                    .get_by_url(dest_channel_url.to_string())
-                    .into_diagnostic()?;
-                if let (
-                    _,
-                    Some(Authentication::S3Credentials {
-                        access_key_id,
-                        secret_access_key,
-                        session_token,
-                    }),
-                ) = auth
-                {
-                    opendal_s3_config.access_key_id = Some(access_key_id);
-                    opendal_s3_config.secret_access_key = Some(secret_access_key);
-                    opendal_s3_config.session_token = session_token;
-                } else {
-                    return Err(miette::miette!("Missing S3 credentials"));
-                }
-            }
+            opendal_s3_config.region = Some(credentials.region);
+            opendal_s3_config.endpoint = Some(credentials.endpoint_url.to_string());
+            opendal_s3_config.access_key_id = Some(credentials.access_key_id);
+            opendal_s3_config.secret_access_key = Some(credentials.secret_access_key);
+            opendal_s3_config.session_token = credentials.session_token;
+            opendal_s3_config.enable_virtual_host_style =
+                credentials.addressing_style == S3AddressingStyle::VirtualHost;
+            // Everything is resolved already, so don't let opendal load the AWS
+            // configuration a second time. Its signer doesn't support SSO.
+            opendal_s3_config.disable_config_load = true;
 
             OpenDALConfigurator::S3(opendal_s3_config)
         }
@@ -992,7 +979,7 @@ async fn get_subdirs(
     Ok(subdirs)
 }
 
-fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware> {
+async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware> {
     let client = Client::builder()
         .pool_max_idle_per_host(20)
         .user_agent(format!("conda-mirror/{}", env!("CARGO_PKG_VERSION")))
@@ -1001,70 +988,60 @@ fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware
         .expect("failed to create reqwest Client");
     let mut client_builder = ClientBuilder::new(client.clone());
 
-    let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-    if let NamedChannelOrUrl::Url(source_url) = config.source.clone()
-        && source_url.scheme() == "s3"
-    {
+    let mut auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
+
+    let source_url = match &config.source {
+        NamedChannelOrUrl::Url(url) if url.scheme() == "s3" => Some(url.clone()),
+        source => {
+            // S3 credentials are only meaningful for an S3 source.
+            if config.s3_credentials_source.is_some() {
+                return Err(miette::miette!("Source is not an S3 URL: {}", source));
+            }
+            None
+        }
+    };
+
+    if let Some(source_url) = source_url {
         let s3_host = source_url
             .host()
             .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
             .to_string();
-        let s3_config = config
-            .clone()
-            .s3_config_source
-            .ok_or(miette::miette!("No S3 source config set"))?;
+        let credentials = resolve_s3_credentials(
+            &source_url,
+            config.s3_config_source.as_ref(),
+            config.s3_credentials_source.as_ref(),
+            &auth_store,
+        )
+        .await?;
+
+        // Store the resolved credentials so that the S3 middleware picks them up
+        // when it signs requests.
+        let memory_storage = MemoryStorage::default();
+        memory_storage
+            .store(
+                s3_host.as_str(),
+                &Authentication::S3Credentials {
+                    access_key_id: credentials.access_key_id,
+                    secret_access_key: credentials.secret_access_key,
+                    session_token: credentials.session_token,
+                },
+            )
+            .into_diagnostic()?;
+        auth_store.backends.insert(0, Arc::new(memory_storage));
 
         let s3_middleware = S3Middleware::new(
             HashMap::from([(
                 s3_host,
                 S3Config::Custom {
-                    endpoint_url: s3_config.endpoint_url,
-                    region: s3_config.region,
-                    force_path_style: s3_config.force_path_style,
+                    endpoint_url: credentials.endpoint_url,
+                    region: credentials.region,
+                    force_path_style: credentials.addressing_style == S3AddressingStyle::Path,
                 },
             )]),
-            // TODO: once rattler has a custom InMemoryBackend, add this to auth_store with custom source credentials
-            auth_store,
+            auth_store.clone(),
         );
         client_builder = client_builder.with(s3_middleware);
     }
-
-    let auth_store = if let Some(s3_credentials) = config.s3_credentials_source.clone() {
-        let mut auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-        let memory_storage = MemoryStorage::default();
-        let s3_host = match config.source.clone() {
-            NamedChannelOrUrl::Path(_) | NamedChannelOrUrl::Name(_) => {
-                return Err(miette::miette!(
-                    "Source is not an S3 URL: {}",
-                    config.source
-                ));
-            }
-            NamedChannelOrUrl::Url(url) => {
-                let scheme = url.scheme();
-                if scheme != "s3" {
-                    return Err(miette::miette!("Invalid S3 URL: {}", url));
-                }
-                let host = url
-                    .host()
-                    .ok_or(miette::miette!("Invalid S3 URL: {}", url))?;
-                host.to_string()
-            }
-        };
-        memory_storage
-            .store(
-                s3_host.as_str(),
-                &Authentication::S3Credentials {
-                    access_key_id: s3_credentials.access_key_id,
-                    secret_access_key: s3_credentials.secret_access_key,
-                    session_token: s3_credentials.session_token,
-                },
-            )
-            .into_diagnostic()?;
-        auth_store.backends.insert(0, Arc::new(memory_storage));
-        auth_store
-    } else {
-        AuthenticationStorage::from_env_and_defaults().into_diagnostic()?
-    };
 
     client_builder = client_builder.with_arc(Arc::new(
         AuthenticationMiddleware::from_auth_storage(auth_store),

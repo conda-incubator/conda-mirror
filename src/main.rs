@@ -10,6 +10,13 @@ use conda_mirror::{
 
 /* -------------------------------------------- MAIN ------------------------------------------- */
 
+/// Merge the S3 settings from the CLI with the ones from the configuration file,
+/// preferring the CLI. Returns `None` if nothing is configured at all.
+fn merge_s3_config(cli: S3Config, yaml: Option<S3Config>) -> Option<S3Config> {
+    let merged = cli.merge(yaml.unwrap_or_default());
+    (!merged.is_empty()).then_some(merged)
+}
+
 /// The main entrypoint for the conda-mirror CLI.
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -82,52 +89,27 @@ async fn main() -> miette::Result<()> {
         (None, None) => MirrorMode::All,
     };
 
-    let s3_config_destination = if let (Some(endpoint_url), Some(region), Some(force_path_style)) = (
-        cli_config.s3_endpoint_url_destination,
-        cli_config.s3_region_destination,
-        cli_config.s3_force_path_style_destination,
-    ) {
-        Some(S3Config {
-            endpoint_url,
-            region,
-            force_path_style,
-        })
-    } else if let Some(s3_config_source_dest) = yaml_config.s3_config.clone() {
-        if let Some(s3_config) = s3_config_source_dest.destination {
-            Some(S3Config {
-                endpoint_url: s3_config.endpoint_url,
-                region: s3_config.region,
-                force_path_style: s3_config.force_path_style,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let s3_config_source = if let (Some(endpoint_url), Some(region), Some(force_path_style)) = (
-        cli_config.s3_endpoint_url_source,
-        cli_config.s3_region_source,
-        cli_config.s3_force_path_style_source,
-    ) {
-        Some(S3Config {
-            endpoint_url,
-            region,
-            force_path_style,
-        })
-    } else if let Some(s3_config_source_dest) = yaml_config.s3_config {
-        if let Some(s3_config) = s3_config_source_dest.source {
-            Some(S3Config {
-                endpoint_url: s3_config.endpoint_url,
-                region: s3_config.region,
-                force_path_style: s3_config.force_path_style,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // The CLI takes precedence over the configuration file, per setting. Anything
+    // that is left unset is resolved through the AWS SDK.
+    let s3_config_destination = merge_s3_config(
+        S3Config {
+            endpoint_url: cli_config.s3_endpoint_url_destination,
+            region: cli_config.s3_region_destination,
+            force_path_style: cli_config.s3_force_path_style_destination,
+        },
+        yaml_config
+            .s3_config
+            .clone()
+            .and_then(|s3_config| s3_config.destination),
+    );
+    let s3_config_source = merge_s3_config(
+        S3Config {
+            endpoint_url: cli_config.s3_endpoint_url_source,
+            region: cli_config.s3_region_source,
+            force_path_style: cli_config.s3_force_path_style_source,
+        },
+        yaml_config.s3_config.and_then(|s3_config| s3_config.source),
+    );
 
     let s3_credentials_destination = if let (Some(access_key_id), Some(secret_access_key)) = (
         cli_config.s3_access_key_id_destination,
