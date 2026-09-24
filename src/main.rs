@@ -1,5 +1,6 @@
 use clap::Parser;
 use miette::IntoDiagnostic;
+use url::Url;
 
 use conda_mirror::{
     config::{
@@ -9,6 +10,29 @@ use conda_mirror::{
 };
 
 /* -------------------------------------------- MAIN ------------------------------------------- */
+
+/// The S3 settings for one side of the mirror, taken from the CLI if they are all
+/// set there and from the configuration file otherwise. Returns `None` if they are
+/// configured in neither place, in which case they are resolved through the AWS
+/// SDK.
+fn s3_config(
+    endpoint_url: Option<Url>,
+    region: Option<String>,
+    force_path_style: Option<bool>,
+    yaml: Option<S3Config>,
+) -> Option<S3Config> {
+    if let (Some(endpoint_url), Some(region), Some(force_path_style)) =
+        (endpoint_url, region, force_path_style)
+    {
+        Some(S3Config {
+            endpoint_url,
+            region,
+            force_path_style,
+        })
+    } else {
+        yaml
+    }
+}
 
 /// The main entrypoint for the conda-mirror CLI.
 #[tokio::main]
@@ -82,52 +106,23 @@ async fn main() -> miette::Result<()> {
         (None, None) => MirrorMode::All,
     };
 
-    let s3_config_destination = if let (Some(endpoint_url), Some(region), Some(force_path_style)) = (
+    // The CLI takes precedence over the configuration file. If neither configures
+    // the S3 settings, they are resolved through the AWS SDK.
+    let s3_config_destination = s3_config(
         cli_config.s3_endpoint_url_destination,
         cli_config.s3_region_destination,
         cli_config.s3_force_path_style_destination,
-    ) {
-        Some(S3Config {
-            endpoint_url,
-            region,
-            force_path_style,
-        })
-    } else if let Some(s3_config_source_dest) = yaml_config.s3_config.clone() {
-        if let Some(s3_config) = s3_config_source_dest.destination {
-            Some(S3Config {
-                endpoint_url: s3_config.endpoint_url,
-                region: s3_config.region,
-                force_path_style: s3_config.force_path_style,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let s3_config_source = if let (Some(endpoint_url), Some(region), Some(force_path_style)) = (
+        yaml_config
+            .s3_config
+            .clone()
+            .and_then(|s3_config| s3_config.destination),
+    );
+    let s3_config_source = s3_config(
         cli_config.s3_endpoint_url_source,
         cli_config.s3_region_source,
         cli_config.s3_force_path_style_source,
-    ) {
-        Some(S3Config {
-            endpoint_url,
-            region,
-            force_path_style,
-        })
-    } else if let Some(s3_config_source_dest) = yaml_config.s3_config {
-        if let Some(s3_config) = s3_config_source_dest.source {
-            Some(S3Config {
-                endpoint_url: s3_config.endpoint_url,
-                region: s3_config.region,
-                force_path_style: s3_config.force_path_style,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+        yaml_config.s3_config.and_then(|s3_config| s3_config.source),
+    );
 
     let s3_credentials_destination = if let (Some(access_key_id), Some(secret_access_key)) = (
         cli_config.s3_access_key_id_destination,

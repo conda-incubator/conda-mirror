@@ -148,7 +148,7 @@ subdirs:
 
 #### S3 configuration
 
-When using S3, you need to configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.
+When using S3, you can configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.
 You can either set these by using the appropriate CLI flags or by using a configuration file.
 You can set `s3-precondition-check` to `true` or `false` to enable or disable precondition checks when uploading the repodata to the destination. Defaults to `true`.
 
@@ -170,3 +170,18 @@ precondition-checks: true
 ```
 
 See [pixi's documentation](https://pixi.sh/latest/deployment/s3/#s3-compatible-storage) for configuring S3-compatible storage like Cloudflare R2 or Hetzner Object Storage.
+
+The S3 settings are all-or-nothing: either you configure all of them for a side of the mirror, or you configure none of them and everything is resolved through the AWS SDK instead.
+The latter is what you want for plain AWS S3, where no `s3-config` is needed at all:
+
+```yml
+source: conda-forge
+destination: s3://my-destination-bucket/my-channel
+```
+
+The AWS SDK resolves the endpoint URL, the region and the credentials the same way the `aws` CLI does, so `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` and friends, `~/.aws/config` profiles (including SSO), and instance metadata all work.
+When using AWS SSO, make sure the session is active by running `aws sso login` before mirroring.
+
+If you do set the S3 settings explicitly, the credentials have to come from either the `--s3-access-key-id-*` / `--s3-secret-access-key-*` / `--s3-session-token-*` flags (or their `S3_*_SOURCE` / `S3_*_DESTINATION` environment variables) or from the credentials stored by `pixi auth login` for the bucket.
+
+Note that credentials are resolved once when `conda-mirror` starts, so temporary credentials that expire during a long mirror run are not refreshed.
