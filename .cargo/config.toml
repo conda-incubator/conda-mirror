@@ -1,6 +1,13 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
+# `rattler_networking` builds a vendored libdbus (for keyring/secret-service support). GCC compiles
+# its `__sync_*` atomics into outline atomic helpers (`__aarch64_ldadd4_sync`) that only live in
+# libgcc, which a static musl binary does not link against. Rust's own `compiler_builtins` ships the
+# relax/acq/rel/acq_rel variants but not `_sync`, so the link fails. Emit the atomics inline instead.
+[env]
+CFLAGS_aarch64_unknown_linux_musl = "-mno-outline-atomics"
+
 # These are some variables that configure the build so that the binary size is reduced.
 # Inspiration was taken from this blog: https://arusahni.net/blog/2020/03/optimizing-rust-binary-size.html
 # They only enable it on main and releases.
