@@ -149,29 +149,40 @@ impl fmt::Display for HumanBitsPerSecond {
     }
 }
 
-/// The S3 error codes that mean the credentials a request was signed with are no
-/// longer usable.
+/// The markers that mean the credentials behind a request are no longer usable.
 ///
-/// The destination returns them with status 400, which opendal folds into
-/// [`opendal::ErrorKind::Unexpected`] and marks as permanent, so neither the retry
-/// layer nor the next package gets any further. The code itself only survives in
-/// the error message, which holds the debug representation of the parsed S3 error.
-const UNUSABLE_CREDENTIAL_CODES: [&str; 4] = [
+/// The first four are S3 error codes. The destination returns them with status
+/// 400, which opendal folds into [`opendal::ErrorKind::Unexpected`] and marks as
+/// permanent, so neither the retry layer nor the next package gets any further.
+/// The code itself only survives in the error message, which holds the debug
+/// representation of the parsed S3 error.
+///
+/// The last one comes from the signer instead of the destination: the request was
+/// never signed, because no provider could produce credentials for it. Note that
+/// `reqsign` reports this without the underlying cause, because
+/// `ProvideCredentialChain` logs the error of each provider it tries and then
+/// returns as if the provider had simply held no credentials.
+const UNUSABLE_CREDENTIAL_MARKERS: [&str; 5] = [
     "ExpiredToken",
     "ExpiredTokenException",
     "TokenRefreshRequired",
     "InvalidToken",
+    "failed to load signing credential",
 ];
 
-/// Whether the destination rejected our credentials for good.
+/// Whether the credentials behind a request are unusable for good.
 ///
 /// Credentials are renewed while they are still valid, so by the time this is
 /// true the renewal itself has already failed: the SSO session ended, the
 /// assumed role is gone, or the bucket never accepted these credentials.
 fn has_unusable_credentials(error: &opendal::Error) -> bool {
-    UNUSABLE_CREDENTIAL_CODES
+    // Rendering the error walks its whole chain. Matching on
+    // [`opendal::Error::message`] alone would miss everything that a service or
+    // the signer left in the source of the error.
+    let rendered = error.to_string();
+    UNUSABLE_CREDENTIAL_MARKERS
         .iter()
-        .any(|code| error.message().contains(code))
+        .any(|marker| rendered.contains(marker))
 }
 
 /// A one-way signal that the run cannot get any further.
@@ -1320,10 +1331,26 @@ mod tests {
         )
     }
 
+    /// How opendal renders a request it could not sign: its own message says no
+    /// more than which step failed, and the reason sits in the source.
+    fn unsigned_request_error() -> opendal::Error {
+        opendal::Error::new(opendal::ErrorKind::Unexpected, "signing http request")
+            .with_operation("reqsign::Sign")
+            .with_context("service", "s3")
+            .set_source(std::io::Error::other(
+                "invalid credentials: failed to load signing credential, context: { credential_type: reqsign_aws_v4::Credential }",
+            ))
+    }
+
     #[test]
     fn an_expired_token_makes_the_credentials_unusable() {
         assert!(has_unusable_credentials(&s3_error("ExpiredToken")));
         assert!(has_unusable_credentials(&s3_error("TokenRefreshRequired")));
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_signed_makes_the_credentials_unusable() {
+        assert!(has_unusable_credentials(&unsigned_request_error()));
     }
 
     #[test]
