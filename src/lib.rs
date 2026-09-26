@@ -15,7 +15,7 @@ use rattler_networking::{
     retry_policies::ExponentialBackoff,
     s3_middleware::S3Config,
 };
-use rattler_s3::S3AddressingStyle;
+use rattler_s3::S3CredentialSource;
 use reqwest::StatusCode;
 use reqwest_middleware::{
     ClientBuilder, ClientWithMiddleware,
@@ -29,7 +29,10 @@ use std::{
     fmt,
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -44,13 +47,41 @@ use url::Url;
 pub mod config;
 mod s3;
 use config::{CondaMirrorConfig, MirrorMode};
-use s3::resolve_s3_credentials;
+use s3::{resolve_s3_credential_source, resolve_s3_credentials};
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum OpenDALConfigurator {
     File(opendal::services::FsConfig),
-    S3(opendal::services::S3Config),
+    S3 {
+        /// Where the credentials that sign the requests come from. It is kept
+        /// around rather than flattened into a set of credentials so that opendal
+        /// can ask it for a fresh set whenever the ones it holds are about to
+        /// expire.
+        credentials: S3CredentialSource,
+        bucket: String,
+        root: String,
+    },
+}
+
+impl OpenDALConfigurator {
+    /// Build the operator that writes to the destination.
+    ///
+    /// One operator is built per subdirectory. In the S3 case they all share the
+    /// credential source, and with it the cache that lets a single refresh serve
+    /// every subdirectory.
+    fn build_operator(&self, max_retries: usize) -> Result<Operator, opendal::Error> {
+        let op = match self {
+            Self::File(config) => Operator::new(config.clone().into_builder())?.finish(),
+            Self::S3 {
+                credentials,
+                bucket,
+                root,
+            } => Operator::new(credentials.opendal_builder(bucket, root))?.finish(),
+        };
+
+        Ok(op.layer(RetryLayer::new().with_max_times(max_retries)))
+    }
 }
 
 #[derive(Debug)]
@@ -118,6 +149,143 @@ impl fmt::Display for HumanBitsPerSecond {
     }
 }
 
+/// The markers that mean the credentials behind a request are no longer usable.
+///
+/// The first four are S3 error codes. The destination returns them with status
+/// 400, which opendal folds into [`opendal::ErrorKind::Unexpected`] and marks as
+/// permanent, so neither the retry layer nor the next package gets any further.
+/// The code itself only survives in the error message, which holds the debug
+/// representation of the parsed S3 error.
+///
+/// The last one comes from the signer instead of the destination: the request was
+/// never signed, because no provider could produce credentials for it. Note that
+/// `reqsign` reports this without the underlying cause, because
+/// `ProvideCredentialChain` logs the error of each provider it tries and then
+/// returns as if the provider had simply held no credentials.
+const UNUSABLE_CREDENTIAL_MARKERS: [&str; 5] = [
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "TokenRefreshRequired",
+    "InvalidToken",
+    "failed to load signing credential",
+];
+
+/// Whether the credentials behind a request are unusable for good.
+///
+/// Credentials are renewed while they are still valid, so by the time this is
+/// true the renewal itself has already failed: the SSO session ended, the
+/// assumed role is gone, or the bucket never accepted these credentials.
+fn has_unusable_credentials(error: &opendal::Error) -> bool {
+    // Rendering the error walks its whole chain. Matching on
+    // [`opendal::Error::message`] alone would miss everything that a service or
+    // the signer left in the source of the error.
+    let rendered = error.to_string();
+    UNUSABLE_CREDENTIAL_MARKERS
+        .iter()
+        .any(|marker| rendered.contains(marker))
+}
+
+/// A one-way signal that the run cannot get any further.
+///
+/// Every package is dispatched as its own task up front, so without this a dead
+/// set of credentials produces one failed download and one error per remaining
+/// package. Tasks that have not started yet return early instead, which turns
+/// hundreds of thousands of errors back into the single one that matters.
+#[derive(Clone, Debug, Default)]
+struct Abort(Arc<AtomicBool>);
+
+impl Abort {
+    fn signal(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is_signalled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// What a package task did, so that work skipped after an [`Abort`] is not
+/// counted as mirrored.
+enum PackageOutcome {
+    Done,
+    Skipped,
+}
+
+/// Collects what happened to the packages of one subdir.
+///
+/// A single broken package does not end the run, so failures are gathered and
+/// reported together. Credentials that stopped working are the exception: they
+/// are reported once and raise the [`Abort`], because every task behind them
+/// would fail in exactly the same way.
+struct PackageOutcomes {
+    subdir: Platform,
+    /// What the tasks were doing, for the log messages. Either `add` or `delete`.
+    operation: &'static str,
+    skipped: usize,
+    failed: Vec<MirrorPackageError>,
+    unusable_credentials: Option<MirrorPackageError>,
+}
+
+impl PackageOutcomes {
+    fn new(subdir: Platform, operation: &'static str) -> Self {
+        Self {
+            subdir,
+            operation,
+            skipped: 0,
+            failed: Vec::new(),
+            unusable_credentials: None,
+        }
+    }
+
+    fn record(&mut self, result: Result<PackageOutcome, MirrorPackageError>, abort: &Abort) {
+        let error = match result {
+            Ok(PackageOutcome::Done) => return,
+            Ok(PackageOutcome::Skipped) => {
+                self.skipped += 1;
+                return;
+            }
+            Err(error) => error,
+        };
+
+        if error.has_unusable_credentials() {
+            abort.signal();
+            if self.unusable_credentials.is_none() {
+                tracing::error!(
+                    "Stopping, the credentials for the destination are no longer usable: {}",
+                    error.source,
+                );
+                self.unusable_credentials = Some(error);
+            }
+            // Any further task reporting the same thing is left unlogged, which is
+            // the whole point of stopping early.
+            return;
+        }
+
+        tracing::error!(
+            "Failed to {} package {}/{}: {}",
+            self.operation,
+            self.subdir,
+            error.filename,
+            error.source,
+        );
+        self.failed.push(error);
+    }
+
+    /// How many packages were neither handled nor skipped.
+    fn failed(&self) -> usize {
+        self.failed.len() + usize::from(self.unusable_credentials.is_some())
+    }
+
+    /// Why the run cannot continue, if it cannot.
+    fn stop_reason(&mut self) -> Option<MirrorSubdirErrorKind> {
+        if let Some(error) = self.unusable_credentials.take() {
+            return Some(MirrorSubdirErrorKind::UnusableCredentials(Box::new(error)));
+        }
+        // Nothing wrong with this subdir, it just did not get to finish.
+        (self.skipped > 0).then_some(MirrorSubdirErrorKind::Aborted)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MirrorPackageErrorKind {
     #[error("failed to open file {0}: {1}")]
@@ -145,12 +313,29 @@ pub enum MirrorPackageErrorKind {
     UnsuccessfulFetch { status: StatusCode, url: Url },
 }
 
+impl MirrorPackageErrorKind {
+    /// Whether this failure is the destination refusing our credentials, which
+    /// every other package is about to run into as well.
+    fn has_unusable_credentials(&self) -> bool {
+        match self {
+            Self::Upload(_, error) | Self::Delete(_, error) => has_unusable_credentials(error),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("error downloading {filename}: {source}")]
 pub struct MirrorPackageError {
     pub filename: String,
     #[source]
     pub source: Box<MirrorPackageErrorKind>,
+}
+
+impl MirrorPackageError {
+    fn has_unusable_credentials(&self) -> bool {
+        self.source.has_unusable_credentials()
+    }
 }
 
 trait WithFileContext<T> {
@@ -195,6 +380,26 @@ pub enum MirrorSubdirErrorKind {
     UrlParseError(#[source] url::ParseError),
     #[error("failed to write repodata: {0}")]
     WriteRepodata(#[source] rattler_index::error::RepodataError),
+    #[error("the credentials for the destination are no longer usable: {0}")]
+    UnusableCredentials(#[source] Box<MirrorPackageError>),
+    #[error("skipped, because the run was already stopped")]
+    Aborted,
+}
+
+impl MirrorSubdirErrorKind {
+    /// Whether this failure is the destination refusing our credentials, in which
+    /// case there is nothing left for the other subdirs to do either.
+    fn has_unusable_credentials(&self) -> bool {
+        match self {
+            Self::UnusableCredentials(_) => true,
+            Self::FailedToConstructOpenDalOperator(error)
+            | Self::FailedToQueryAvailablePackages(error) => has_unusable_credentials(error),
+            Self::WriteRepodata(rattler_index::error::RepodataError::Opendal(error)) => {
+                has_unusable_credentials(error)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -246,7 +451,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         }
         "s3" => {
             let auth_storage = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-            let credentials = resolve_s3_credentials(
+            let credentials = resolve_s3_credential_source(
                 dest_channel_url,
                 config.s3_config_destination.as_ref(),
                 config.s3_credentials_destination.as_ref(),
@@ -254,24 +459,14 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
             )
             .await?;
 
-            let mut opendal_s3_config = opendal::services::S3Config::default();
-            opendal_s3_config.root = Some(dest_channel_url.path().to_string());
-            opendal_s3_config.bucket = dest_channel_url
-                .host_str()
-                .ok_or(miette::miette!("No bucket in S3 URL"))?
-                .to_string();
-            opendal_s3_config.region = Some(credentials.region);
-            opendal_s3_config.endpoint = Some(credentials.endpoint_url.to_string());
-            opendal_s3_config.access_key_id = Some(credentials.access_key_id);
-            opendal_s3_config.secret_access_key = Some(credentials.secret_access_key);
-            opendal_s3_config.session_token = credentials.session_token;
-            opendal_s3_config.enable_virtual_host_style =
-                credentials.addressing_style == S3AddressingStyle::VirtualHost;
-            // Everything is resolved already, so don't let opendal load the AWS
-            // configuration a second time. Its signer doesn't support SSO.
-            opendal_s3_config.disable_config_load = true;
-
-            OpenDALConfigurator::S3(opendal_s3_config)
+            OpenDALConfigurator::S3 {
+                credentials,
+                bucket: dest_channel_url
+                    .host_str()
+                    .ok_or(miette::miette!("No bucket in S3 URL"))?
+                    .to_string(),
+                root: dest_channel_url.path().to_string(),
+            }
         }
         _ => {
             return Err(miette::miette!(
@@ -311,6 +506,8 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
 
     let speed_tracker_bar = Arc::new(Mutex::new(SpeedTrackerBar::new(speed_bar, window_duration)));
 
+    let abort = Abort::default();
+
     for subdir in subdirs.clone() {
         let config = config.clone();
         let client = client.clone();
@@ -318,45 +515,44 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         let semaphore = semaphore.clone();
         let opendal_config = opendal_config.clone();
         let speed_tracker_bar = speed_tracker_bar.clone();
+        let abort = abort.clone();
         let task = async move {
-            match &opendal_config {
-                // todo: call mirror_subdir with configurator instead
-                OpenDALConfigurator::File(opendal_config) => {
-                    mirror_subdir(
-                        config.clone(),
-                        opendal_config.clone(),
-                        client.clone(),
-                        subdir,
-                        multi_progress.clone(),
-                        semaphore.clone(),
-                        speed_tracker_bar.clone(),
-                    )
-                    .await // TODO: remove async move and .await
-                }
-                OpenDALConfigurator::S3(opendal_config) => {
-                    mirror_subdir(
-                        config.clone(),
-                        opendal_config.clone(),
-                        client.clone(),
-                        subdir,
-                        multi_progress.clone(),
-                        semaphore.clone(),
-                        speed_tracker_bar.clone(),
-                    )
-                    .await
-                }
-            }
+            mirror_subdir(
+                config,
+                opendal_config,
+                client,
+                subdir,
+                multi_progress,
+                semaphore,
+                speed_tracker_bar,
+                abort,
+            )
+            .await // TODO: remove async move and .await
         };
         tasks.push(tokio::spawn(task));
     }
 
     let mut failed = Vec::new();
+    let mut aborted = Vec::new();
+    let mut unusable_credentials = None;
     while let Some(join_result) = tasks.next().await {
         match join_result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::error!("Failed to process subdir {}: {}", e.subdir, e.source);
-                failed.push(e);
+                if e.source.has_unusable_credentials() {
+                    // Nothing else can succeed either, so stop the remaining subdirs
+                    // rather than let each of them rediscover this.
+                    abort.signal();
+                    if unusable_credentials.is_none() {
+                        tracing::error!("Stopping in subdir {}: {}", e.subdir, e.source);
+                        unusable_credentials = Some(e);
+                    }
+                } else if matches!(e.source, MirrorSubdirErrorKind::Aborted) {
+                    aborted.push(e.subdir);
+                } else {
+                    tracing::error!("Failed to process subdir {}: {}", e.subdir, e.source);
+                    failed.push(e);
+                }
             }
             Err(join_err) => {
                 tasks.clear();
@@ -364,6 +560,24 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
                 return Err(miette::miette!("Task panicked: {}", join_err));
             }
         }
+    }
+
+    if let Some(error) = unusable_credentials {
+        eprintln!("❌ Mirroring stopped in {}: {}", error.subdir, error.source);
+        if !aborted.is_empty() {
+            eprintln!("   {} more subdirs were left unfinished.", aborted.len());
+        }
+        for error in &failed {
+            eprintln!(" - {}: {}", error.subdir, error.source);
+        }
+        return Err(miette::miette!(
+            help = "the credentials expired mid-run and could not be renewed. Refresh them (with \
+                    AWS SSO: `aws sso login`) and start the mirror again, it continues where it \
+                    left off",
+            "mirroring {} failed: {}",
+            error.subdir,
+            error.source
+        ));
     }
 
     if failed.is_empty() {
@@ -444,6 +658,7 @@ async fn dispatch_tasks_delete(
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
+    abort: Abort,
 ) -> Result<(), MirrorSubdirErrorKind> {
     let mut tasks = FuturesUnordered::new();
     if !packages_to_delete.is_empty() {
@@ -459,11 +674,19 @@ async fn dispatch_tasks_delete(
             let pb = pb.clone();
             let semaphore = semaphore.clone();
             let op = op.clone();
+            let abort = abort.clone();
             let task = async move {
                 let _permit = semaphore
                     .acquire()
                     .await
                     .expect("Semaphore was unexpectedly closed");
+
+                // Checked once the task actually gets to run, so that whatever is
+                // still queued when the run is stopped costs nothing.
+                if abort.is_signalled() {
+                    return Ok(PackageOutcome::Skipped);
+                }
+
                 pb.set_message(format!(
                     "Deleting packages in {} {}",
                     subdir.as_str(),
@@ -477,25 +700,21 @@ async fn dispatch_tasks_delete(
                     .with_filename(&filename)?;
 
                 pb.inc(1);
-                let res: Result<(), MirrorPackageError> = Ok(());
+                let res: Result<PackageOutcome, MirrorPackageError> = Ok(PackageOutcome::Done);
                 res
             };
             tasks.push(tokio::spawn(task));
         }
 
-        let mut succeeded = Vec::new();
-        let mut failed = Vec::new();
+        let mut outcomes = PackageOutcomes::new(subdir, "delete");
         while let Some(join_result) = tasks.next().await {
             match join_result {
-                Ok(Ok(result)) => succeeded.push(result),
-                Ok(Err(e)) => {
-                    tracing::error!(
-                        "Failed to delete package {subdir}/{}: {}",
-                        e.filename,
-                        e.source,
-                    );
-                    failed.push(e);
-                    pb.inc(1);
+                Ok(result) => {
+                    // The task itself only counts the packages it got through.
+                    if result.is_err() {
+                        pb.inc(1);
+                    }
+                    outcomes.record(result, &abort);
                 }
                 Err(join_err) => {
                     tracing::error!("Task panicked: {}", join_err);
@@ -511,10 +730,19 @@ async fn dispatch_tasks_delete(
         }
         tracing::info!(
             "Deleted {}/{} packages in subdir {}",
-            packages_to_delete_len - failed.len(),
+            packages_to_delete_len - outcomes.failed() - outcomes.skipped,
             packages_to_delete_len,
             subdir.as_str()
         );
+        if let Some(reason) = outcomes.stop_reason() {
+            pb.abandon_with_message(format!(
+                "{} {}",
+                console::style("Stopped deleting packages in").red(),
+                console::style(subdir.as_str()).bold(),
+            ));
+            return Err(reason);
+        }
+        let failed = outcomes.failed;
         if failed.is_empty() {
             pb.finish_with_message(format!(
                 "{} {}",
@@ -545,6 +773,7 @@ async fn dispatch_tasks_add(
     semaphore: Arc<Semaphore>,
     op: Operator,
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
+    abort: Abort,
 ) -> Result<(), MirrorSubdirErrorKind> {
     if packages_to_add.is_empty() {
         return Ok(());
@@ -566,6 +795,7 @@ async fn dispatch_tasks_add(
         let semaphore = semaphore.clone();
         let client = client.clone();
         let op = op.clone();
+        let abort = abort.clone();
         let package_url = config
             .package_url(filename.as_str(), subdir)
             .map_err(MirrorSubdirErrorKind::UrlParseError)?;
@@ -574,6 +804,12 @@ async fn dispatch_tasks_add(
                 .acquire()
                 .await
                 .expect("Semaphore was unexpectedly closed");
+
+            // Checked before the download starts, so that stopping the run does not
+            // cost one request to the source per remaining package.
+            if abort.is_signalled() {
+                return Ok(PackageOutcome::Skipped);
+            }
 
             pb.set_message(format!(
                 "Mirroring {} {}",
@@ -707,25 +943,21 @@ async fn dispatch_tasks_add(
             };
 
             speed_bar_guard.progress_bar.set_message(msg);
-            let res: Result<(), MirrorPackageError> = Ok(());
+            let res: Result<PackageOutcome, MirrorPackageError> = Ok(PackageOutcome::Done);
             res
         };
         tasks.push(tokio::spawn(task));
     }
 
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
+    let mut outcomes = PackageOutcomes::new(subdir, "add");
     while let Some(join_result) = tasks.next().await {
         match join_result {
-            Ok(Ok(result)) => succeeded.push(result),
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "Failed to add package {subdir}/{}: {}",
-                    e.filename,
-                    e.source,
-                );
-                pb.inc(1);
-                failed.push(e);
+            Ok(result) => {
+                // The task itself only counts the packages it got through.
+                if result.is_err() {
+                    pb.inc(1);
+                }
+                outcomes.record(result, &abort);
             }
             Err(join_err) => {
                 tasks.clear();
@@ -741,10 +973,20 @@ async fn dispatch_tasks_add(
     }
     tracing::info!(
         "Added {}/{} packages in subdir {}",
-        packages_to_add_len - failed.len(),
+        packages_to_add_len - outcomes.failed() - outcomes.skipped,
         packages_to_add_len,
         subdir.as_str()
     );
+    if let Some(reason) = outcomes.stop_reason() {
+        pb.abandon_with_message(format!(
+            "{} {} with {} packages left",
+            console::style("Stopped adding packages in").red(),
+            console::style(subdir.as_str()).bold(),
+            outcomes.skipped,
+        ));
+        return Err(reason);
+    }
+    let failed = outcomes.failed;
     if failed.is_empty() {
         pb.finish_with_message(format!(
             "{} {}",
@@ -763,15 +1005,23 @@ async fn dispatch_tasks_add(
     Ok(())
 }
 
-async fn mirror_subdir<T: Configurator>(
+#[allow(clippy::too_many_arguments)]
+async fn mirror_subdir(
     config: CondaMirrorConfig,
-    opendal_config: T,
+    opendal_config: OpenDALConfigurator,
     client: ClientWithMiddleware,
     subdir: Platform,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
+    abort: Abort,
 ) -> Result<(), MirrorSubdirError> {
+    // Subdirs are mirrored concurrently, so a subdir can be stopped before it ever
+    // started fetching its repodata.
+    if abort.is_signalled() {
+        return Err(MirrorSubdirErrorKind::Aborted).with_subdir(subdir);
+    }
+
     let repodata_url = config.repodata_url(subdir);
     // TODO: implement spinner for repodata fetching, use rattler-repodata-gateway for sharded repodata?
     let repodata = if repodata_url.scheme() == "file" {
@@ -806,12 +1056,10 @@ async fn mirror_subdir<T: Configurator>(
     };
     tracing::info!("Fetched repo data for subdir: {}", subdir);
 
-    let builder = opendal_config.into_builder();
-    let op = Operator::new(builder)
+    let op = opendal_config
+        .build_operator(config.max_retries.into())
         .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
-        .with_subdir(subdir)?
-        .layer(RetryLayer::new().with_max_times(config.max_retries.into()))
-        .finish();
+        .with_subdir(subdir)?;
     let available_packages = op
         .list_with(&format!("{}/", subdir.as_str()))
         .await
@@ -886,6 +1134,7 @@ async fn mirror_subdir<T: Configurator>(
         progress.clone(),
         semaphore.clone(),
         op.clone(),
+        abort.clone(),
     )
     .await
     .with_subdir(subdir)?;
@@ -900,6 +1149,7 @@ async fn mirror_subdir<T: Configurator>(
         semaphore.clone(),
         op.clone(),
         speed_tracker_bar.clone(),
+        abort.clone(),
     )
     .await
     .with_subdir(subdir)?;
@@ -1046,7 +1296,7 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
                 S3Config::Custom {
                     endpoint_url: credentials.endpoint_url,
                     region: credentials.region,
-                    force_path_style: credentials.addressing_style == S3AddressingStyle::Path,
+                    addressing_style: credentials.addressing_style,
                 },
             )]),
             auth_store.clone(),
@@ -1064,4 +1314,180 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
 
     let authenticated_client = client_builder.build();
     Ok(authenticated_client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How opendal renders an S3 error: the code only survives in the message, as
+    /// the debug representation of the parsed response body.
+    fn s3_error(code: &str) -> opendal::Error {
+        opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            format!(
+                r#"S3Error {{ code: "{code}", message: "The provided token has expired.", resource: "", request_id: "X7TBW8QCC4NQ4F9H" }}"#
+            ),
+        )
+    }
+
+    /// How opendal renders a request it could not sign: its own message says no
+    /// more than which step failed, and the reason sits in the source.
+    fn unsigned_request_error() -> opendal::Error {
+        opendal::Error::new(opendal::ErrorKind::Unexpected, "signing http request")
+            .with_operation("reqsign::Sign")
+            .with_context("service", "s3")
+            .set_source(std::io::Error::other(
+                "invalid credentials: failed to load signing credential, context: { credential_type: reqsign_aws_v4::Credential }",
+            ))
+    }
+
+    #[test]
+    fn an_expired_token_makes_the_credentials_unusable() {
+        assert!(has_unusable_credentials(&s3_error("ExpiredToken")));
+        assert!(has_unusable_credentials(&s3_error("TokenRefreshRequired")));
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_signed_makes_the_credentials_unusable() {
+        assert!(has_unusable_credentials(&unsigned_request_error()));
+    }
+
+    #[test]
+    fn an_ordinary_failure_leaves_the_credentials_alone() {
+        assert!(!has_unusable_credentials(&s3_error("NoSuchKey")));
+        assert!(!has_unusable_credentials(&s3_error("SlowDown")));
+        assert!(!has_unusable_credentials(&opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "unexpected eof while reading the response body",
+        )));
+    }
+
+    #[test]
+    fn an_expired_token_is_recognized_through_the_error_chain() {
+        let upload = MirrorPackageError {
+            filename: "ripgrep-14.1.1-h1234567_0.conda".to_string(),
+            source: Box::new(MirrorPackageErrorKind::Upload(
+                "noarch/ripgrep-14.1.1-h1234567_0.conda".to_string(),
+                s3_error("ExpiredToken"),
+            )),
+        };
+        assert!(upload.has_unusable_credentials());
+        assert!(
+            MirrorSubdirErrorKind::UnusableCredentials(Box::new(upload)).has_unusable_credentials()
+        );
+
+        assert!(
+            MirrorSubdirErrorKind::FailedToQueryAvailablePackages(s3_error("ExpiredToken"))
+                .has_unusable_credentials()
+        );
+        assert!(
+            MirrorSubdirErrorKind::WriteRepodata(s3_error("ExpiredToken").into())
+                .has_unusable_credentials()
+        );
+    }
+
+    #[test]
+    fn a_digest_mismatch_does_not_stop_the_run() {
+        let mismatch = MirrorPackageError {
+            filename: "ripgrep-14.1.1-h1234567_0.conda".to_string(),
+            source: Box::new(MirrorPackageErrorKind::InvalidSize {
+                expected: 42,
+                actual: 7,
+            }),
+        };
+        assert!(!mismatch.has_unusable_credentials());
+        assert!(!MirrorSubdirErrorKind::FailedToAddPackages(3).has_unusable_credentials());
+        assert!(!MirrorSubdirErrorKind::Aborted.has_unusable_credentials());
+    }
+
+    fn package_error(kind: MirrorPackageErrorKind) -> MirrorPackageError {
+        MirrorPackageError {
+            filename: "ripgrep-14.1.1-h1234567_0.conda".to_string(),
+            source: Box::new(kind),
+        }
+    }
+
+    fn upload_failure(code: &str) -> MirrorPackageError {
+        package_error(MirrorPackageErrorKind::Upload(
+            "noarch/ripgrep-14.1.1-h1234567_0.conda".to_string(),
+            s3_error(code),
+        ))
+    }
+
+    #[test]
+    fn ordinary_failures_are_collected_and_the_run_goes_on() {
+        let abort = Abort::default();
+        let mut outcomes = PackageOutcomes::new(Platform::NoArch, "add");
+
+        outcomes.record(Ok(PackageOutcome::Done), &abort);
+        outcomes.record(Err(upload_failure("NoSuchBucket")), &abort);
+        outcomes.record(Ok(PackageOutcome::Done), &abort);
+
+        assert_eq!(outcomes.failed(), 1);
+        assert_eq!(outcomes.skipped, 0);
+        assert!(!abort.is_signalled());
+        assert!(outcomes.stop_reason().is_none());
+    }
+
+    #[test]
+    fn expired_credentials_stop_the_run_and_are_reported_once() {
+        let abort = Abort::default();
+        let mut outcomes = PackageOutcomes::new(Platform::NoArch, "add");
+
+        outcomes.record(Ok(PackageOutcome::Done), &abort);
+        outcomes.record(Err(upload_failure("ExpiredToken")), &abort);
+        assert!(
+            abort.is_signalled(),
+            "the first expired token has to stop everything else"
+        );
+
+        // The tasks that were already in flight hit the same wall, and the ones
+        // behind them return without doing any work at all.
+        outcomes.record(Err(upload_failure("ExpiredToken")), &abort);
+        outcomes.record(Ok(PackageOutcome::Skipped), &abort);
+        outcomes.record(Ok(PackageOutcome::Skipped), &abort);
+
+        assert!(
+            outcomes.failed.is_empty(),
+            "expired credentials are not collected as per-package failures"
+        );
+        assert_eq!(outcomes.skipped, 2);
+
+        let reason = outcomes.stop_reason().expect("the run has to stop");
+        assert!(reason.has_unusable_credentials());
+        assert!(
+            matches!(reason, MirrorSubdirErrorKind::UnusableCredentials(error)
+                if error.filename == "ripgrep-14.1.1-h1234567_0.conda"),
+            "the error that stopped the run is the one that gets reported"
+        );
+    }
+
+    #[test]
+    fn a_subdir_that_only_got_skipped_reports_as_aborted() {
+        let abort = Abort::default();
+        abort.signal();
+        let mut outcomes = PackageOutcomes::new(Platform::Linux64, "delete");
+
+        outcomes.record(Ok(PackageOutcome::Skipped), &abort);
+        outcomes.record(Ok(PackageOutcome::Skipped), &abort);
+
+        assert_eq!(outcomes.failed(), 0);
+        assert!(matches!(
+            outcomes.stop_reason(),
+            Some(MirrorSubdirErrorKind::Aborted)
+        ));
+    }
+
+    #[test]
+    fn the_abort_signal_latches() {
+        let abort = Abort::default();
+        assert!(!abort.is_signalled());
+
+        // Every task holds its own handle to the same signal.
+        let cloned = abort.clone();
+        cloned.signal();
+        assert!(abort.is_signalled());
+        assert!(cloned.is_signalled());
+    }
 }
