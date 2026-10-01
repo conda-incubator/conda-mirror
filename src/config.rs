@@ -1,7 +1,7 @@
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
     Channel, ChannelConfig, MatchSpec, NamedChannelOrUrl, ParseStrictness,
-    ParseStrictnessWithNameMatcher, Platform,
+    ParseStrictnessWithNameMatcher, Subdir,
 };
 use serde::{Deserialize, Deserializer};
 use std::{env::current_dir, path::PathBuf};
@@ -26,7 +26,7 @@ pub struct CliConfig {
 
     /// The subdirectories to mirror.
     #[arg(long)]
-    pub subdir: Option<Vec<Platform>>,
+    pub subdir: Option<Vec<Subdir>>,
 
     /// The configuration file to use.
     #[arg(short, long)]
@@ -179,7 +179,7 @@ pub struct S3ConfigSourceDest {
 pub struct CondaMirrorYamlConfig {
     pub source: Option<NamedChannelOrUrl>,
     pub destination: Option<NamedChannelOrUrl>,
-    pub subdirs: Option<Vec<Platform>>,
+    pub subdirs: Option<Vec<Subdir>>,
 
     pub max_retries: Option<u8>,
     pub max_parallel: Option<u8>,
@@ -209,7 +209,7 @@ pub enum MirrorMode {
 pub struct CondaMirrorConfig {
     pub source: NamedChannelOrUrl,
     pub destination: NamedChannelOrUrl,
-    pub subdirs: Option<Vec<Platform>>,
+    pub subdirs: Option<Vec<Subdir>>,
     pub mode: MirrorMode,
     pub max_retries: u8,
     pub max_parallel: u8,
@@ -228,7 +228,7 @@ impl CondaMirrorConfig {
     pub fn new(
         source: NamedChannelOrUrl,
         destination: NamedChannelOrUrl,
-        subdirs: Option<Vec<Platform>>,
+        subdirs: Option<Vec<Subdir>>,
         mode: MirrorMode,
         max_retries: u8,
         max_parallel: u8,
@@ -262,11 +262,11 @@ impl CondaMirrorConfig {
         })
     }
 
-    fn platform_url(&self, platform: Platform) -> Url {
+    fn platform_url(&self, platform: Subdir) -> Url {
         self.channel_source.platform_url(platform)
     }
 
-    pub(crate) fn repodata_url(&self, platform: Platform) -> Url {
+    pub(crate) fn repodata_url(&self, platform: Subdir) -> Url {
         self.platform_url(platform)
             .join("repodata.json")
             .expect("repodata.json can be joined")
@@ -275,7 +275,7 @@ impl CondaMirrorConfig {
     pub(crate) fn package_url(
         &self,
         filename: &str,
-        platform: Platform,
+        platform: Subdir,
     ) -> Result<Url, url::ParseError> {
         self.platform_url(platform).join(filename)
     }

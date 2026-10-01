@@ -112,25 +112,3 @@ pub(crate) async fn resolve_s3_credential_source(
     // We have no credentials of our own, so leave them to the AWS SDK.
     from_sdk.ok_or_else(|| missing_credentials(bucket_url))
 }
-
-/// Resolve the settings and credentials needed to talk to the S3 bucket of
-/// `bucket_url`.
-///
-/// Note that credentials are resolved once, so temporary credentials that expire
-/// during a long mirror run are not refreshed. Prefer
-/// [`resolve_s3_credential_source`] where the consumer can refresh them itself.
-pub(crate) async fn resolve_s3_credentials(
-    bucket_url: &Url,
-    s3_config: Option<&S3Config>,
-    credentials: Option<&S3Credentials>,
-    auth_storage: &AuthenticationStorage,
-) -> miette::Result<ResolvedS3Credentials> {
-    resolve_s3_credential_source(bucket_url, s3_config, credentials, auth_storage)
-        .await?
-        .credentials()
-        .await
-        .into_diagnostic()
-        .wrap_err_with(|| {
-            format!("failed to resolve the S3 credentials of {bucket_url} through the AWS SDK")
-        })
-}

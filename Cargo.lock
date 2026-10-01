@@ -1114,7 +1114,8 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 [[package]]
 name = "coalesced_map"
 version = "0.1.4"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae1159673deb7e62cf1be84e4cda5dfc584fac013123096a2e720d777694ecd"
 dependencies = [
  "dashmap",
  "tokio",
@@ -1728,7 +1729,8 @@ dependencies = [
 [[package]]
 name = "file_url"
 version = "0.3.2"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e68d9ad067554ef18d79494f0e0bcddaf263f41b0126eb7a937f9e942fcbbd8"
 dependencies = [
  "itertools 0.15.0",
  "percent-encoding",
@@ -1954,7 +1956,6 @@ version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
- "serde",
  "typenum",
  "version_check",
  "zeroize",
@@ -3697,8 +3698,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_cache"
-version = "0.10.12"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.10.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cac00ef2535fedbc52eed88459f4119f663f9ff267000eb54310ed1046a7509a"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3731,8 +3733,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_conda_types"
-version = "0.54.0"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.55.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "608417ef675180a85a179e94d604b3540aa1431991e33b23be34e39d6886e229"
 dependencies = [
  "ahash",
  "core-foundation 0.10.1",
@@ -3775,7 +3778,8 @@ dependencies = [
 [[package]]
 name = "rattler_conda_version"
 version = "0.1.2"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "226c0502f7e6574d7eedf72096fb64586671ce44a6636485ebb93e70c34b7824"
 dependencies = [
  "itertools 0.15.0",
  "nom",
@@ -3786,8 +3790,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_config"
-version = "0.7.6"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d0307999275d7887e0d71798054d3dd184b08b4bd8dec6f55fe7463fe8c917"
 dependencies = [
  "dirs",
  "fs-err",
@@ -3804,12 +3809,12 @@ dependencies = [
 
 [[package]]
 name = "rattler_digest"
-version = "1.4.0"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8ef7b5419c3e3ebb69ff4b9bfc9e255cdc8db9ca335caabe4f91db2531ab06c"
 dependencies = [
  "blake2",
  "digest 0.11.3",
- "generic-array",
  "hex",
  "md-5",
  "serde",
@@ -3823,8 +3828,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_index"
-version = "0.31.7"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "793c4dd8c1aa4575021b2ae7d29504068a4416431a0f613aab59efa6097b715d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3863,7 +3869,8 @@ dependencies = [
 [[package]]
 name = "rattler_macros"
 version = "1.2.0"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8486f97bfa849cd72f331ad79f5c702893c4c015cc662ea7b4385264a38b133"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -3871,11 +3878,11 @@ dependencies = [
 
 [[package]]
 name = "rattler_networking"
-version = "0.30.10"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9032229711eae397410b2f294907a7c7f0ba917660fbb9457ddd75464137c25f"
 dependencies = [
  "ambient-id",
- "anyhow",
  "apple-native-keyring-store",
  "astral-reqwest-middleware",
  "async-once-cell",
@@ -3908,8 +3915,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_package_streaming"
-version = "0.27.7"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.27.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bbaeb8cdf160f7a2dfdc55a55bdde754c1fa65f14cc16d30c93eb4e4c4b1d61"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-tokio-tar",
@@ -3918,7 +3926,6 @@ dependencies = [
  "async-compression",
  "bytes",
  "bzip2",
- "dunce",
  "filetime",
  "fs-err",
  "futures",
@@ -3950,7 +3957,8 @@ dependencies = [
 [[package]]
 name = "rattler_redaction"
 version = "0.2.6"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15eb57b14b409fdbefcb3d51af3de55a99d31bf6380bc8c36cbd9b9abac38d9f"
 dependencies = [
  "astral-reqwest-middleware",
  "reqwest",
@@ -3959,8 +3967,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_repodata_gateway"
-version = "0.33.6"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f75726238d7aac9208fb3375e83d99c6ad44a56bd3854efe6b9ee08792f429f7"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4016,8 +4025,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_s3"
-version = "0.2.16"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7fac2f6b5516e760a876c33a723fdaaada31f5e305eb550ccad869d40036434"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -4830,7 +4840,8 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "simple_spawn_blocking"
 version = "1.1.1"
-source = "git+https://github.com/pavelzw/rattler?branch=refactor%2Fs3-refreshable-credentials-adoption#bd7714598de076ec3d2a32a379b46c9c72211527"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83a7b2679ee03cca581f57e5a4fecac405aa6b5d5174abe65b4b41fa181d8438"
 dependencies = [
  "tokio",
 ]

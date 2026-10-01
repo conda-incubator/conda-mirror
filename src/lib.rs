@@ -4,16 +4,14 @@ use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
-    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
+    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, RepoData, Subdir,
     package::{CondaArchiveType, DistArchiveIdentifier, DistArchiveType},
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
-    Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
-    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
+    AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     retry_policies::ExponentialBackoff,
-    s3_middleware::S3Config,
 };
 use rattler_s3::S3CredentialSource;
 use reqwest::StatusCode;
@@ -47,7 +45,7 @@ use url::Url;
 pub mod config;
 mod s3;
 use config::{CondaMirrorConfig, MirrorMode};
-use s3::{resolve_s3_credential_source, resolve_s3_credentials};
+use s3::resolve_s3_credential_source;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -218,7 +216,7 @@ enum PackageOutcome {
 /// are reported once and raise the [`Abort`], because every task behind them
 /// would fail in exactly the same way.
 struct PackageOutcomes {
-    subdir: Platform,
+    subdir: Subdir,
     /// What the tasks were doing, for the log messages. Either `add` or `delete`.
     operation: &'static str,
     skipped: usize,
@@ -227,7 +225,7 @@ struct PackageOutcomes {
 }
 
 impl PackageOutcomes {
-    fn new(subdir: Platform, operation: &'static str) -> Self {
+    fn new(subdir: Subdir, operation: &'static str) -> Self {
         Self {
             subdir,
             operation,
@@ -405,20 +403,20 @@ impl MirrorSubdirErrorKind {
 #[derive(Debug, Error)]
 #[error("error mirroring subdir {subdir}: {source}")]
 pub struct MirrorSubdirError {
-    pub subdir: Platform,
+    pub subdir: Subdir,
     #[source]
     pub source: MirrorSubdirErrorKind,
 }
 
 trait WithSubdirContext<T> {
-    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError>;
+    fn with_subdir(self, subdir: Subdir) -> Result<T, MirrorSubdirError>;
 }
 
 impl<T, E> WithSubdirContext<T> for Result<T, E>
 where
     MirrorSubdirErrorKind: From<E>,
 {
-    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError> {
+    fn with_subdir(self, subdir: Subdir) -> Result<T, MirrorSubdirError> {
         self.map_err(|err| MirrorSubdirError {
             subdir,
             source: err.into(),
@@ -654,7 +652,7 @@ impl BytesStream {
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_delete(
     packages_to_delete: Vec<String>,
-    subdir: Platform,
+    subdir: Subdir,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
@@ -766,7 +764,7 @@ async fn dispatch_tasks_delete(
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_add(
     packages_to_add: HashMap<String, PackageRecord>,
-    subdir: Platform,
+    subdir: Subdir,
     config: &CondaMirrorConfig,
     client: ClientWithMiddleware,
     progress: Arc<MultiProgress>,
@@ -1010,7 +1008,7 @@ async fn mirror_subdir(
     config: CondaMirrorConfig,
     opendal_config: OpenDALConfigurator,
     client: ClientWithMiddleware,
-    subdir: Platform,
+    subdir: Subdir,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
@@ -1206,14 +1204,14 @@ async fn mirror_subdir(
 async fn get_subdirs(
     config: &CondaMirrorConfig,
     client: ClientWithMiddleware,
-) -> miette::Result<Vec<Platform>> {
+) -> miette::Result<Vec<Subdir>> {
     if let Some(subdirs) = config.subdirs.clone() {
         return Ok(subdirs);
     }
 
     let mut subdirs = Vec::new();
 
-    for subdir in Platform::all() {
+    for subdir in Subdir::all() {
         tracing::debug!("Checking subdir: {}", subdir);
         let repodata_url = config.repodata_url(subdir);
 
@@ -1249,7 +1247,7 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
         .expect("failed to create reqwest Client");
     let mut client_builder = ClientBuilder::new(client.clone());
 
-    let mut auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
+    let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
 
     let source_url = match &config.source {
         NamedChannelOrUrl::Url(url) if url.scheme() == "s3" => Some(url.clone()),
@@ -1267,7 +1265,10 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
             .host()
             .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
             .to_string();
-        let credentials = resolve_s3_credentials(
+        // Hand the credential source to the S3 middleware, so that it asks the AWS
+        // SDK for fresh credentials once the ones it holds expire, rather than
+        // presigning every request with a snapshot taken at startup.
+        let credentials = resolve_s3_credential_source(
             &source_url,
             config.s3_config_source.as_ref(),
             config.s3_credentials_source.as_ref(),
@@ -1275,30 +1276,8 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
         )
         .await?;
 
-        // Store the resolved credentials so that the S3 middleware picks them up
-        // when it signs requests.
-        let memory_storage = MemoryStorage::default();
-        memory_storage
-            .store(
-                s3_host.as_str(),
-                &Authentication::S3Credentials {
-                    access_key_id: credentials.access_key_id,
-                    secret_access_key: credentials.secret_access_key,
-                    session_token: credentials.session_token,
-                },
-            )
-            .into_diagnostic()?;
-        auth_store.backends.insert(0, Arc::new(memory_storage));
-
         let s3_middleware = S3Middleware::new(
-            HashMap::from([(
-                s3_host,
-                S3Config::Custom {
-                    endpoint_url: credentials.endpoint_url,
-                    region: credentials.region,
-                    addressing_style: credentials.addressing_style,
-                },
-            )]),
+            HashMap::from([(s3_host, credentials.into())]),
             auth_store.clone(),
         );
         client_builder = client_builder.with(s3_middleware);
@@ -1418,7 +1397,7 @@ mod tests {
     #[test]
     fn ordinary_failures_are_collected_and_the_run_goes_on() {
         let abort = Abort::default();
-        let mut outcomes = PackageOutcomes::new(Platform::NoArch, "add");
+        let mut outcomes = PackageOutcomes::new(Subdir::NoArch, "add");
 
         outcomes.record(Ok(PackageOutcome::Done), &abort);
         outcomes.record(Err(upload_failure("NoSuchBucket")), &abort);
@@ -1433,7 +1412,7 @@ mod tests {
     #[test]
     fn expired_credentials_stop_the_run_and_are_reported_once() {
         let abort = Abort::default();
-        let mut outcomes = PackageOutcomes::new(Platform::NoArch, "add");
+        let mut outcomes = PackageOutcomes::new(Subdir::NoArch, "add");
 
         outcomes.record(Ok(PackageOutcome::Done), &abort);
         outcomes.record(Err(upload_failure("ExpiredToken")), &abort);
@@ -1467,7 +1446,7 @@ mod tests {
     fn a_subdir_that_only_got_skipped_reports_as_aborted() {
         let abort = Abort::default();
         abort.signal();
-        let mut outcomes = PackageOutcomes::new(Platform::Linux64, "delete");
+        let mut outcomes = PackageOutcomes::new(Subdir::Linux64, "delete");
 
         outcomes.record(Ok(PackageOutcome::Skipped), &abort);
         outcomes.record(Ok(PackageOutcome::Skipped), &abort);
