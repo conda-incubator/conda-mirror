@@ -37,8 +37,6 @@ rattler_networking = { version = "0.31.0", features = [
   "s3",
 ], default-features = false }
 rattler_repodata_gateway = { version = "0.34.0", default-features = false }
-# The `opendal` feature is what lets us build operators that renew expiring
-# credentials, see `S3CredentialSource::opendal_builder`.
 rattler_s3 = { version = "0.3.0", features = ["opendal"] }
 reqwest = { version = "0.13.5", features = [
   "stream",
