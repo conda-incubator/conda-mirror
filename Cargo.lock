@@ -1159,7 +1159,7 @@ checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "conda-mirror"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-reqwest-retry",
@@ -1956,7 +1956,6 @@ version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
- "serde",
  "typenum",
  "version_check",
  "zeroize",
@@ -3699,9 +3698,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_cache"
-version = "0.10.11"
+version = "0.10.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f606d520b6ac15c28d4c21fc31871c17b93faed3193d8e6595777f9b4978d40"
+checksum = "cac00ef2535fedbc52eed88459f4119f663f9ff267000eb54310ed1046a7509a"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3734,9 +3733,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_conda_types"
-version = "0.53.0"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d347674ae946804b2d3f7c38591e511a019aeef414bf8c036b78589f6980f77"
+checksum = "608417ef675180a85a179e94d604b3540aa1431991e33b23be34e39d6886e229"
 dependencies = [
  "ahash",
  "core-foundation 0.10.1",
@@ -3778,9 +3777,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_conda_version"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46fd80ddd753d6499a742e42ee657b4c5f334dd806a59585c8b8923ecc479fc7"
+checksum = "226c0502f7e6574d7eedf72096fb64586671ce44a6636485ebb93e70c34b7824"
 dependencies = [
  "itertools 0.15.0",
  "nom",
@@ -3791,9 +3790,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_config"
-version = "0.7.5"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86455bd4b876cc44d9c656ba73937eba961037259031fffaf14d339baa3a7d86"
+checksum = "c5d0307999275d7887e0d71798054d3dd184b08b4bd8dec6f55fe7463fe8c917"
 dependencies = [
  "dirs",
  "fs-err",
@@ -3810,13 +3809,12 @@ dependencies = [
 
 [[package]]
 name = "rattler_digest"
-version = "1.3.2"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56538779701395adba456293b22fda6598b079f30c24d9a22c2bb15271bd67f3"
+checksum = "e8ef7b5419c3e3ebb69ff4b9bfc9e255cdc8db9ca335caabe4f91db2531ab06c"
 dependencies = [
  "blake2",
  "digest 0.11.3",
- "generic-array",
  "hex",
  "md-5",
  "serde",
@@ -3830,9 +3828,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_index"
-version = "0.31.6"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1680bd1261d82218f4850e0e2a7969938a73512f81cc6b40dca60ed640669531"
+checksum = "793c4dd8c1aa4575021b2ae7d29504068a4416431a0f613aab59efa6097b715d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3870,9 +3868,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_macros"
-version = "1.1.2"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc1bde42798a908a8a2609836a062f01117b83a3fba6f8f6be3eb8c1d07bfdf2"
+checksum = "e8486f97bfa849cd72f331ad79f5c702893c4c015cc662ea7b4385264a38b133"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -3880,12 +3878,11 @@ dependencies = [
 
 [[package]]
 name = "rattler_networking"
-version = "0.30.9"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97e7434618535717205b32954cfbcfc383ca3720d46f276e76aef547fa4e296e"
+checksum = "9032229711eae397410b2f294907a7c7f0ba917660fbb9457ddd75464137c25f"
 dependencies = [
  "ambient-id",
- "anyhow",
  "apple-native-keyring-store",
  "astral-reqwest-middleware",
  "async-once-cell",
@@ -3918,9 +3915,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_package_streaming"
-version = "0.27.6"
+version = "0.27.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b71d3d0e86bfc6fe6006d82149cad2ca710f207d9209b037c1f843b020fee4f2"
+checksum = "9bbaeb8cdf160f7a2dfdc55a55bdde754c1fa65f14cc16d30c93eb4e4c4b1d61"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-tokio-tar",
@@ -3929,7 +3926,6 @@ dependencies = [
  "async-compression",
  "bytes",
  "bzip2",
- "dunce",
  "filetime",
  "fs-err",
  "futures",
@@ -3960,9 +3956,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_redaction"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05886a15155b2b76a9f40e334a92eed586ce5da37c7cc35a38b3a64c18466b7a"
+checksum = "15eb57b14b409fdbefcb3d51af3de55a99d31bf6380bc8c36cbd9b9abac38d9f"
 dependencies = [
  "astral-reqwest-middleware",
  "reqwest",
@@ -3971,9 +3967,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_repodata_gateway"
-version = "0.33.5"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c068cc0d128f1a70c58924ed435b7fafe8609bb9c6f6be27482995d2ea85b4c0"
+checksum = "f75726238d7aac9208fb3375e83d99c6ad44a56bd3854efe6b9ee08792f429f7"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4029,18 +4025,20 @@ dependencies = [
 
 [[package]]
 name = "rattler_s3"
-version = "0.2.15"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95281ccc5095ca86389dbd5627f111dcafeffd14186be90b5134f170fa479dc6"
+checksum = "b7fac2f6b5516e760a876c33a723fdaaada31f5e305eb550ccad869d40036434"
 dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "clap",
+ "opendal",
  "rattler_networking",
+ "reqsign-aws-v4",
+ "reqsign-core",
  "thiserror 2.0.21",
- "tracing",
  "url",
 ]
 

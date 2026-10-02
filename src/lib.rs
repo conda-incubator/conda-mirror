@@ -4,18 +4,16 @@ use miette::IntoDiagnostic;
 use number_prefix::NumberPrefix;
 use opendal::{Configurator, Operator, layers::RetryLayer};
 use rattler_conda_types::{
-    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, Platform, RepoData,
+    ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, RepoData, Subdir,
     package::{CondaArchiveType, DistArchiveIdentifier, DistArchiveType},
 };
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
-    Authentication, AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
-    authentication_storage::{StorageBackend, backends::memory::MemoryStorage},
+    AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
     retry_policies::ExponentialBackoff,
-    s3_middleware::S3Config,
 };
-use rattler_s3::S3AddressingStyle;
+use rattler_s3::S3CredentialSource;
 use reqwest::StatusCode;
 use reqwest_middleware::{
     ClientBuilder, ClientWithMiddleware,
@@ -44,13 +42,41 @@ use url::Url;
 pub mod config;
 mod s3;
 use config::{CondaMirrorConfig, MirrorMode};
-use s3::resolve_s3_credentials;
+use s3::resolve_s3_credential_source;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum OpenDALConfigurator {
     File(opendal::services::FsConfig),
-    S3(opendal::services::S3Config),
+    S3 {
+        /// Where the credentials that sign the requests come from. It is kept
+        /// around rather than flattened into a set of credentials so that opendal
+        /// can ask it for a fresh set whenever the ones it holds are about to
+        /// expire.
+        credentials: S3CredentialSource,
+        bucket: String,
+        root: String,
+    },
+}
+
+impl OpenDALConfigurator {
+    /// Build the operator that writes to the destination.
+    ///
+    /// One operator is built per subdirectory. In the S3 case they all share the
+    /// credential source, and with it the cache that lets a single refresh serve
+    /// every subdirectory.
+    fn build_operator(&self, max_retries: usize) -> Result<Operator, opendal::Error> {
+        let op = match self {
+            Self::File(config) => Operator::new(config.clone().into_builder())?.finish(),
+            Self::S3 {
+                credentials,
+                bucket,
+                root,
+            } => Operator::new(credentials.opendal_builder(bucket, root))?.finish(),
+        };
+
+        Ok(op.layer(RetryLayer::new().with_max_times(max_retries)))
+    }
 }
 
 #[derive(Debug)]
@@ -200,20 +226,20 @@ pub enum MirrorSubdirErrorKind {
 #[derive(Debug, Error)]
 #[error("error mirroring subdir {subdir}: {source}")]
 pub struct MirrorSubdirError {
-    pub subdir: Platform,
+    pub subdir: Subdir,
     #[source]
     pub source: MirrorSubdirErrorKind,
 }
 
 trait WithSubdirContext<T> {
-    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError>;
+    fn with_subdir(self, subdir: Subdir) -> Result<T, MirrorSubdirError>;
 }
 
 impl<T, E> WithSubdirContext<T> for Result<T, E>
 where
     MirrorSubdirErrorKind: From<E>,
 {
-    fn with_subdir(self, subdir: Platform) -> Result<T, MirrorSubdirError> {
+    fn with_subdir(self, subdir: Subdir) -> Result<T, MirrorSubdirError> {
         self.map_err(|err| MirrorSubdirError {
             subdir,
             source: err.into(),
@@ -246,7 +272,7 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         }
         "s3" => {
             let auth_storage = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
-            let credentials = resolve_s3_credentials(
+            let credentials = resolve_s3_credential_source(
                 dest_channel_url,
                 config.s3_config_destination.as_ref(),
                 config.s3_credentials_destination.as_ref(),
@@ -254,24 +280,14 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
             )
             .await?;
 
-            let mut opendal_s3_config = opendal::services::S3Config::default();
-            opendal_s3_config.root = Some(dest_channel_url.path().to_string());
-            opendal_s3_config.bucket = dest_channel_url
-                .host_str()
-                .ok_or(miette::miette!("No bucket in S3 URL"))?
-                .to_string();
-            opendal_s3_config.region = Some(credentials.region);
-            opendal_s3_config.endpoint = Some(credentials.endpoint_url.to_string());
-            opendal_s3_config.access_key_id = Some(credentials.access_key_id);
-            opendal_s3_config.secret_access_key = Some(credentials.secret_access_key);
-            opendal_s3_config.session_token = credentials.session_token;
-            opendal_s3_config.enable_virtual_host_style =
-                credentials.addressing_style == S3AddressingStyle::VirtualHost;
-            // Everything is resolved already, so don't let opendal load the AWS
-            // configuration a second time. Its signer doesn't support SSO.
-            opendal_s3_config.disable_config_load = true;
-
-            OpenDALConfigurator::S3(opendal_s3_config)
+            OpenDALConfigurator::S3 {
+                credentials,
+                bucket: dest_channel_url
+                    .host_str()
+                    .ok_or(miette::miette!("No bucket in S3 URL"))?
+                    .to_string(),
+                root: dest_channel_url.path().to_string(),
+            }
         }
         _ => {
             return Err(miette::miette!(
@@ -319,33 +335,16 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
         let opendal_config = opendal_config.clone();
         let speed_tracker_bar = speed_tracker_bar.clone();
         let task = async move {
-            match &opendal_config {
-                // todo: call mirror_subdir with configurator instead
-                OpenDALConfigurator::File(opendal_config) => {
-                    mirror_subdir(
-                        config.clone(),
-                        opendal_config.clone(),
-                        client.clone(),
-                        subdir,
-                        multi_progress.clone(),
-                        semaphore.clone(),
-                        speed_tracker_bar.clone(),
-                    )
-                    .await // TODO: remove async move and .await
-                }
-                OpenDALConfigurator::S3(opendal_config) => {
-                    mirror_subdir(
-                        config.clone(),
-                        opendal_config.clone(),
-                        client.clone(),
-                        subdir,
-                        multi_progress.clone(),
-                        semaphore.clone(),
-                        speed_tracker_bar.clone(),
-                    )
-                    .await
-                }
-            }
+            mirror_subdir(
+                config,
+                opendal_config,
+                client,
+                subdir,
+                multi_progress,
+                semaphore,
+                speed_tracker_bar,
+            )
+            .await // TODO: remove async move and .await
         };
         tasks.push(tokio::spawn(task));
     }
@@ -440,7 +439,7 @@ impl BytesStream {
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_delete(
     packages_to_delete: Vec<String>,
-    subdir: Platform,
+    subdir: Subdir,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     op: Operator,
@@ -538,7 +537,7 @@ async fn dispatch_tasks_delete(
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_add(
     packages_to_add: HashMap<String, PackageRecord>,
-    subdir: Platform,
+    subdir: Subdir,
     config: &CondaMirrorConfig,
     client: ClientWithMiddleware,
     progress: Arc<MultiProgress>,
@@ -763,11 +762,11 @@ async fn dispatch_tasks_add(
     Ok(())
 }
 
-async fn mirror_subdir<T: Configurator>(
+async fn mirror_subdir(
     config: CondaMirrorConfig,
-    opendal_config: T,
+    opendal_config: OpenDALConfigurator,
     client: ClientWithMiddleware,
-    subdir: Platform,
+    subdir: Subdir,
     progress: Arc<MultiProgress>,
     semaphore: Arc<Semaphore>,
     speed_tracker_bar: Arc<Mutex<SpeedTrackerBar>>,
@@ -806,12 +805,10 @@ async fn mirror_subdir<T: Configurator>(
     };
     tracing::info!("Fetched repo data for subdir: {}", subdir);
 
-    let builder = opendal_config.into_builder();
-    let op = Operator::new(builder)
+    let op = opendal_config
+        .build_operator(config.max_retries.into())
         .map_err(MirrorSubdirErrorKind::FailedToConstructOpenDalOperator)
-        .with_subdir(subdir)?
-        .layer(RetryLayer::new().with_max_times(config.max_retries.into()))
-        .finish();
+        .with_subdir(subdir)?;
     let available_packages = op
         .list_with(&format!("{}/", subdir.as_str()))
         .await
@@ -956,14 +953,14 @@ async fn mirror_subdir<T: Configurator>(
 async fn get_subdirs(
     config: &CondaMirrorConfig,
     client: ClientWithMiddleware,
-) -> miette::Result<Vec<Platform>> {
+) -> miette::Result<Vec<Subdir>> {
     if let Some(subdirs) = config.subdirs.clone() {
         return Ok(subdirs);
     }
 
     let mut subdirs = Vec::new();
 
-    for subdir in Platform::all() {
+    for subdir in Subdir::all() {
         tracing::debug!("Checking subdir: {}", subdir);
         let repodata_url = config.repodata_url(subdir);
 
@@ -999,7 +996,7 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
         .expect("failed to create reqwest Client");
     let mut client_builder = ClientBuilder::new(client.clone());
 
-    let mut auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
+    let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
 
     let source_url = match &config.source {
         NamedChannelOrUrl::Url(url) if url.scheme() == "s3" => Some(url.clone()),
@@ -1017,7 +1014,10 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
             .host()
             .ok_or(miette::miette!("Invalid S3 url: {}", source_url))?
             .to_string();
-        let credentials = resolve_s3_credentials(
+        // Hand the credential source to the S3 middleware, so that it asks the AWS
+        // SDK for fresh credentials once the ones it holds expire, rather than
+        // presigning every request with a snapshot taken at startup.
+        let credentials = resolve_s3_credential_source(
             &source_url,
             config.s3_config_source.as_ref(),
             config.s3_credentials_source.as_ref(),
@@ -1025,30 +1025,8 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
         )
         .await?;
 
-        // Store the resolved credentials so that the S3 middleware picks them up
-        // when it signs requests.
-        let memory_storage = MemoryStorage::default();
-        memory_storage
-            .store(
-                s3_host.as_str(),
-                &Authentication::S3Credentials {
-                    access_key_id: credentials.access_key_id,
-                    secret_access_key: credentials.secret_access_key,
-                    session_token: credentials.session_token,
-                },
-            )
-            .into_diagnostic()?;
-        auth_store.backends.insert(0, Arc::new(memory_storage));
-
         let s3_middleware = S3Middleware::new(
-            HashMap::from([(
-                s3_host,
-                S3Config::Custom {
-                    endpoint_url: credentials.endpoint_url,
-                    region: credentials.region,
-                    force_path_style: credentials.addressing_style == S3AddressingStyle::Path,
-                },
-            )]),
+            HashMap::from([(s3_host, credentials.into())]),
             auth_store.clone(),
         );
         client_builder = client_builder.with(s3_middleware);
