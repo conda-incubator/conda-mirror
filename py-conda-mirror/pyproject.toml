@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin >=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "py-conda-mirror"
+version = "0.11.4"
+requires-python = ">=3.10"
+description = "Mirror conda channels"
+readme = "README.md"
+authors = [{ name = "Pavel Zwerschke", email = "pavelzw@gmail.com" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Typing :: Typed",
+]
+license = "BSD-3-Clause"
+
+[project.urls]
+Homepage = "https://github.com/conda-incubator/conda-mirror"
+Repository = "https://github.com/conda-incubator/conda-mirror"
+Issues = "https://github.com/conda-incubator/conda-mirror/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+strict = true
