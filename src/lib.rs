@@ -993,12 +993,12 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
         .user_agent(format!("conda-mirror/{}", env!("CARGO_PKG_VERSION")))
         .read_timeout(Duration::from_secs(30));
     if let Some(proxy) = &config.proxy {
-        let proxy = reqwest::Proxy::all(proxy).expect("invalid proxy").no_proxy(reqwest::NoProxy::from_env());
+        let proxy = reqwest::Proxy::all(proxy)
+            .expect("invalid proxy")
+            .no_proxy(reqwest::NoProxy::from_env());
         client = client.proxy(proxy);
     }
-    let client = client
-        .build()
-        .expect("failed to create reqwest Client");
+    let client = client.build().expect("failed to create reqwest Client");
     let mut client_builder = ClientBuilder::new(client.clone());
 
     let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;

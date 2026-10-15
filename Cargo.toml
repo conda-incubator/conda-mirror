@@ -18,24 +18,16 @@ opendal = { version = "0.57.0", features = ["services-fs", "services-s3"] }
 rattler_conda_types = "0.55.0"
 rattler_digest = "2.0.0"
 rattler_index = { version = "0.32.0", default-features = false }
-rattler_networking = {
-  version = "0.31.0",
-  default-features = false,
-  features = [
-    "s3",
-  ]
-}
+rattler_networking = { version = "0.31.0", default-features = false, features = [
+  "s3",
+] }
 rattler_repodata_gateway = { version = "0.34.0", default-features = false }
 rattler_s3 = { version = "0.3.0", features = ["opendal"] }
-reqwest = {
-  version = "0.13.5",
-  default-features = false,
-  features = [
-    "socks",
-    "stream",
-    "system-proxy",
-  ]
-}
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "socks",
+  "stream",
+  "system-proxy",
+] }
 reqwest-middleware = { package = "astral-reqwest-middleware", version = "0.5.1" }
 reqwest-retry = { package = "astral-reqwest-retry", version = "0.9.1" }
 serde = "1.0.229"
@@ -46,13 +38,10 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 tracing = "0.1.44"
-tracing-subscriber = {
-  version = "0.3.23",
-  features = [
-    "default",
-    "env-filter",
-  ]
-}
+tracing-subscriber = { version = "0.3.23", features = [
+  "default",
+  "env-filter",
+] }
 url = "2.5.8"
 
 [features]
