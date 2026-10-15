@@ -149,6 +149,41 @@ subdirs:
   - win-64
 ```
 
+#### Time-based filtering
+
+You can restrict the mirror to packages from a time window with `exclude-newer` and `exclude-older`.
+Both bounds are inclusive and are applied on top of `include` and `exclude`.
+
+```yml
+source: conda-forge
+destination: ./my-channel
+
+include:
+  - "python*"
+
+# RFC 3339 ("2025-10-01T00:00:00Z"), a date ("2025-10-01", midnight UTC),
+# or a span relative to now ("14d", "2 weeks", "1y 6 months")
+exclude-newer: 2025-10-01T00:00:00Z
+exclude-older: 2023-01-01
+
+# allow-missing | require-timestamp (default) | require-indexed-timestamp
+timestamp-policy: require-timestamp
+```
+
+The same settings are available as `--exclude-newer`, `--exclude-older` and `--timestamp-policy` on the command line, which take precedence over the configuration file.
+Relative cutoffs are resolved once when `conda-mirror` starts.
+
+Packages are compared using their server-assigned `indexed_timestamp` ([CEP 47](https://github.com/conda/ceps/blob/main/cep-0047.md)) when the channel provides it, falling back to the builder-controlled `timestamp` otherwise.
+`timestamp-policy` controls this and what happens to packages that have no usable timestamp:
+
+| `timestamp-policy`          | Compared field                        | Packages without it |
+| --------------------------- | ------------------------------------- | ------------------- |
+| `require-timestamp`         | `indexed_timestamp`, else `timestamp` | excluded            |
+| `require-indexed-timestamp` | `indexed_timestamp` only              | excluded            |
+| `allow-missing`             | `indexed_timestamp`, else `timestamp` | mirrored            |
+
+Note that packages already present in the destination that fall outside the window are removed on the next run, just like packages matching `exclude`.
+
 #### S3 configuration
 
 When using S3, you can configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.

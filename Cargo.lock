@@ -1170,6 +1170,7 @@ dependencies = [
  "futures",
  "hex",
  "indicatif",
+ "jiff",
  "miette",
  "number_prefix",
  "opendal",

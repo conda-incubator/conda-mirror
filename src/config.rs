@@ -1,12 +1,14 @@
+use jiff::{Span, Timestamp, civil::Date, tz::TimeZone};
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
-    Channel, ChannelConfig, MatchSpec, NamedChannelOrUrl, ParseStrictness,
-    ParseStrictnessWithNameMatcher, Subdir,
+    Channel, ChannelConfig, MatchSpec, NamedChannelOrUrl, PackageRecord, ParseStrictness,
+    ParseStrictnessWithNameMatcher, Subdir, utils::TimestampMs,
 };
 use serde::{Deserialize, Deserializer};
-use std::{env::current_dir, path::PathBuf};
+use std::{env::current_dir, path::PathBuf, str::FromStr};
+use thiserror::Error;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use clap_verbosity_flag::Verbosity;
 use url::Url;
 
@@ -101,6 +103,22 @@ pub struct CliConfig {
     /// Enable precondition checks when uploading repodata files.
     #[arg(long)]
     pub precondition_checks: Option<bool>,
+
+    /// Exclude packages whose timestamp is after this cutoff. Accepts an RFC
+    /// 3339 timestamp (2025-10-01T00:00:00Z), a date (2025-10-01, midnight
+    /// UTC) or a span relative to now (14d, 2 weeks, 1y).
+    #[arg(long, value_name = "CUTOFF")]
+    pub exclude_newer: Option<TimeCutoff>,
+
+    /// Exclude packages whose timestamp is before this cutoff. Accepts the
+    /// same formats as --exclude-newer.
+    #[arg(long, value_name = "CUTOFF")]
+    pub exclude_older: Option<TimeCutoff>,
+
+    /// Which timestamp to compare against the cutoffs and what to do with
+    /// packages that do not have one.
+    #[arg(long, value_enum)]
+    pub timestamp_policy: Option<TimestampPolicy>,
 }
 
 #[derive(Clone)]
@@ -153,6 +171,198 @@ impl<'de> Deserialize<'de> for MatchSpecWrapper {
     }
 }
 
+/* ----------------------------------------- TIME FILTER ---------------------------------------- */
+
+/// Which timestamp of a package record is compared against the cutoffs and
+/// what happens to records that do not have one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimestampPolicy {
+    /// Prefer `indexed_timestamp` (CEP 47), fall back to `timestamp`. Records
+    /// with neither pass the time filter.
+    AllowMissing,
+    /// Prefer `indexed_timestamp` (CEP 47), fall back to `timestamp`. Records
+    /// with neither are excluded.
+    #[default]
+    RequireTimestamp,
+    /// Only use `indexed_timestamp` (CEP 47). Records without it are excluded.
+    RequireIndexedTimestamp,
+}
+
+impl std::fmt::Display for TimestampPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            TimestampPolicy::AllowMissing => "allow-missing",
+            TimestampPolicy::RequireTimestamp => "require-timestamp",
+            TimestampPolicy::RequireIndexedTimestamp => "require-indexed-timestamp",
+        };
+        f.write_str(name)
+    }
+}
+
+#[derive(Debug, Error)]
+#[error(
+    "invalid time cutoff {0:?}: expected an RFC 3339 timestamp (2025-10-01T00:00:00Z), \
+     a date (2025-10-01) or a positive span relative to now (14d, 2 weeks, 1y)"
+)]
+pub struct ParseTimeCutoffError(String);
+
+/// A point in time as written by the user. Use [`TimeCutoff::resolve`] to turn
+/// it into an instant.
+#[derive(Debug, Clone, Copy)]
+pub enum TimeCutoff {
+    /// An absolute instant.
+    Absolute(Timestamp),
+    /// A span before "now", e.g. `14d`.
+    Relative(Span),
+}
+
+impl FromStr for TimeCutoff {
+    type Err = ParseTimeCutoffError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if let Ok(timestamp) = Timestamp::from_str(s) {
+            return Ok(Self::Absolute(timestamp));
+        }
+        if let Ok(date) = Date::from_str(s)
+            && let Ok(zoned) = date.to_zoned(TimeZone::UTC)
+        {
+            return Ok(Self::Absolute(zoned.timestamp()));
+        }
+        if let Ok(span) = Span::from_str(s)
+            && span.is_positive()
+        {
+            return Ok(Self::Relative(span));
+        }
+        Err(ParseTimeCutoffError(s.to_owned()))
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeCutoff {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TimeCutoff {
+    /// Resolve the cutoff to an instant. Relative cutoffs are subtracted from
+    /// `now` in UTC.
+    pub fn resolve(self, now: Timestamp) -> Result<Timestamp, jiff::Error> {
+        match self {
+            Self::Absolute(timestamp) => Ok(timestamp),
+            Self::Relative(span) => Ok(now.to_zoned(TimeZone::UTC).checked_sub(span)?.timestamp()),
+        }
+    }
+}
+
+/// The outcome of checking a package record against a [`TimeFilter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeVerdict {
+    /// The record is inside the window (or no cutoff is configured).
+    Keep,
+    /// The record has no usable timestamp but the policy lets it pass.
+    KeepMissingTimestamp,
+    /// The record is outside the window.
+    DropOutOfRange,
+    /// The record has no usable timestamp and the policy excludes it.
+    DropMissingTimestamp,
+}
+
+/// Resolved time window that packages must fall into to be mirrored. Both
+/// bounds are inclusive.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TimeFilter {
+    pub exclude_newer: Option<Timestamp>,
+    pub exclude_older: Option<Timestamp>,
+    pub policy: TimestampPolicy,
+}
+
+impl TimeFilter {
+    /// Resolve the user-supplied cutoffs against `now` and validate them.
+    pub fn new(
+        exclude_newer: Option<TimeCutoff>,
+        exclude_older: Option<TimeCutoff>,
+        policy: Option<TimestampPolicy>,
+        now: Timestamp,
+    ) -> miette::Result<Self> {
+        let exclude_newer = exclude_newer
+            .map(|cutoff| cutoff.resolve(now))
+            .transpose()
+            .into_diagnostic()?;
+        let exclude_older = exclude_older
+            .map(|cutoff| cutoff.resolve(now))
+            .transpose()
+            .into_diagnostic()?;
+        if let (Some(older), Some(newer)) = (exclude_older, exclude_newer)
+            && older > newer
+        {
+            return Err(miette::miette!(
+                "exclude-older ({older}) is after exclude-newer ({newer}), no package can match"
+            ));
+        }
+        let filter = Self {
+            exclude_newer,
+            exclude_older,
+            policy: policy.unwrap_or_default(),
+        };
+        if policy.is_some() && !filter.is_active() {
+            tracing::warn!(
+                "timestamp-policy is set but neither exclude-newer nor exclude-older is, it has no effect"
+            );
+        }
+        if let Some(newer) = exclude_newer {
+            tracing::info!("Excluding packages newer than {newer}");
+        }
+        if let Some(older) = exclude_older {
+            tracing::info!("Excluding packages older than {older}");
+        }
+        Ok(filter)
+    }
+
+    /// Whether any cutoff is configured.
+    pub fn is_active(&self) -> bool {
+        self.exclude_newer.is_some() || self.exclude_older.is_some()
+    }
+
+    /// The timestamp of `record` that is compared against the cutoffs under
+    /// the configured policy.
+    pub fn effective_timestamp(&self, record: &PackageRecord) -> Option<Timestamp> {
+        let timestamp = match self.policy {
+            TimestampPolicy::RequireIndexedTimestamp => record.indexed_timestamp,
+            TimestampPolicy::AllowMissing | TimestampPolicy::RequireTimestamp => {
+                record.indexed_timestamp.or(record.timestamp)
+            }
+        };
+        timestamp.as_ref().map(TimestampMs::jiff_timestamp)
+    }
+
+    /// Check `record` against the time window.
+    pub fn verdict(&self, record: &PackageRecord) -> TimeVerdict {
+        if !self.is_active() {
+            return TimeVerdict::Keep;
+        }
+        match self.effective_timestamp(record) {
+            None if self.policy == TimestampPolicy::AllowMissing => {
+                TimeVerdict::KeepMissingTimestamp
+            }
+            None => TimeVerdict::DropMissingTimestamp,
+            Some(timestamp)
+                if self.exclude_newer.is_some_and(|newer| timestamp > newer)
+                    || self.exclude_older.is_some_and(|older| timestamp < older) =>
+            {
+                TimeVerdict::DropOutOfRange
+            }
+            Some(_) => TimeVerdict::Keep,
+        }
+    }
+}
+
 /// The S3 settings for one side of the mirror.
 ///
 /// These settings are all-or-nothing: either all of them are configured, or none
@@ -188,6 +398,10 @@ pub struct CondaMirrorYamlConfig {
     pub exclude: Option<Vec<MatchSpecWrapper>>,
     pub s3_config: Option<S3ConfigSourceDest>,
     pub precondition_checks: Option<bool>,
+
+    pub exclude_newer: Option<TimeCutoff>,
+    pub exclude_older: Option<TimeCutoff>,
+    pub timestamp_policy: Option<TimestampPolicy>,
 }
 
 /* -------------------------------------------- CONFIG ------------------------------------------- */
@@ -220,6 +434,7 @@ pub struct CondaMirrorConfig {
     pub s3_credentials_destination: Option<S3Credentials>,
     pub channel_source: Channel,
     pub precondition_checks: bool,
+    pub time_filter: TimeFilter,
 }
 
 impl CondaMirrorConfig {
@@ -238,6 +453,7 @@ impl CondaMirrorConfig {
         s3_credentials_source: Option<S3Credentials>,
         s3_credentials_destination: Option<S3Credentials>,
         precondition_checks: bool,
+        time_filter: TimeFilter,
     ) -> miette::Result<Self> {
         let channel_source = source
             .clone()
@@ -259,6 +475,7 @@ impl CondaMirrorConfig {
             s3_credentials_destination,
             channel_source,
             precondition_checks,
+            time_filter,
         })
     }
 
@@ -278,5 +495,158 @@ impl CondaMirrorConfig {
         platform: Subdir,
     ) -> Result<Url, url::ParseError> {
         self.platform_url(platform).join(filename)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn utc(year: i16, month: i8, day: i8) -> Timestamp {
+        jiff::civil::date(year, month, day)
+            .to_zoned(TimeZone::UTC)
+            .unwrap()
+            .timestamp()
+    }
+
+    fn now() -> Timestamp {
+        utc(2026, 3, 1)
+    }
+
+    fn resolve(s: &str) -> Timestamp {
+        s.parse::<TimeCutoff>().unwrap().resolve(now()).unwrap()
+    }
+
+    #[test]
+    fn parses_rfc3339() {
+        assert!(matches!(
+            "2025-10-01T00:00:00Z".parse::<TimeCutoff>().unwrap(),
+            TimeCutoff::Absolute(_)
+        ));
+        assert_eq!(resolve("2025-10-01T00:00:00Z"), utc(2025, 10, 1));
+        assert_eq!(resolve("2025-10-01T02:00:00+02:00"), utc(2025, 10, 1));
+    }
+
+    #[test]
+    fn parses_date_as_midnight_utc() {
+        assert_eq!(resolve("2025-10-01"), utc(2025, 10, 1));
+    }
+
+    #[test]
+    fn parses_relative_spans() {
+        assert!(matches!(
+            "14d".parse::<TimeCutoff>().unwrap(),
+            TimeCutoff::Relative(_)
+        ));
+        assert_eq!(resolve("14d"), utc(2026, 2, 15));
+        assert_eq!(resolve("2 weeks"), utc(2026, 2, 15));
+        assert_eq!(resolve("P14D"), utc(2026, 2, 15));
+        assert_eq!(resolve("1y"), utc(2025, 3, 1));
+        assert_eq!(resolve("1y 6 months"), utc(2024, 9, 1));
+    }
+
+    #[test]
+    fn rejects_invalid_cutoffs() {
+        for input in ["", "yesterday", "2025-13-01", "14", "-3d", "0d", "14d ago"] {
+            assert!(
+                input.parse::<TimeCutoff>().is_err(),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn time_filter_defaults() {
+        let filter = TimeFilter::new(None, None, None, now()).unwrap();
+        assert!(!filter.is_active());
+        assert_eq!(filter.policy, TimestampPolicy::RequireTimestamp);
+    }
+
+    #[test]
+    fn time_filter_rejects_inverted_window() {
+        let newer = "2024-01-01".parse().unwrap();
+        let older = "2025-01-01".parse().unwrap();
+        assert!(TimeFilter::new(Some(newer), Some(older), None, now()).is_err());
+        // Equal bounds are a valid, single-instant window.
+        assert!(TimeFilter::new(Some(newer), Some(newer), None, now()).is_ok());
+    }
+
+    #[test]
+    fn yaml_accepts_unquoted_dates_and_spans() {
+        let config: CondaMirrorYamlConfig = serde_yml::from_str(
+            "exclude-newer: 14d\nexclude-older: 2025-10-01\ntimestamp-policy: allow-missing\n",
+        )
+        .unwrap();
+        let filter = TimeFilter::new(
+            config.exclude_newer,
+            config.exclude_older,
+            config.timestamp_policy,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(filter.exclude_newer, Some(utc(2026, 2, 15)));
+        assert_eq!(filter.exclude_older, Some(utc(2025, 10, 1)));
+        assert_eq!(filter.policy, TimestampPolicy::AllowMissing);
+    }
+
+    #[test]
+    fn yaml_accepts_every_policy() {
+        for (input, expected) in [
+            ("allow-missing", TimestampPolicy::AllowMissing),
+            ("require-timestamp", TimestampPolicy::RequireTimestamp),
+            (
+                "require-indexed-timestamp",
+                TimestampPolicy::RequireIndexedTimestamp,
+            ),
+        ] {
+            let config: CondaMirrorYamlConfig =
+                serde_yml::from_str(&format!("timestamp-policy: {input}\n")).unwrap();
+            assert_eq!(config.timestamp_policy, Some(expected));
+        }
+    }
+
+    #[test]
+    fn yaml_rejects_unknown_policy_and_keys() {
+        assert!(
+            serde_yml::from_str::<CondaMirrorYamlConfig>("timestamp-policy: whatever\n").is_err()
+        );
+        assert!(
+            serde_yml::from_str::<CondaMirrorYamlConfig>("exclude-newer: yesterday\n").is_err()
+        );
+        assert!(serde_yml::from_str::<CondaMirrorYamlConfig>("exclude_newer: 14d\n").is_err());
+    }
+
+    #[test]
+    fn cli_parses_time_flags() {
+        let cli = CliConfig::try_parse_from([
+            "conda-mirror",
+            "--exclude-newer",
+            "14d",
+            "--exclude-older",
+            "2023-01-01",
+            "--timestamp-policy",
+            "require-indexed-timestamp",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.exclude_newer.unwrap().resolve(now()).unwrap(),
+            utc(2026, 2, 15)
+        );
+        assert_eq!(
+            cli.exclude_older.unwrap().resolve(now()).unwrap(),
+            utc(2023, 1, 1)
+        );
+        assert_eq!(
+            cli.timestamp_policy,
+            Some(TimestampPolicy::RequireIndexedTimestamp)
+        );
+
+        assert!(
+            CliConfig::try_parse_from(["conda-mirror", "--exclude-newer", "yesterday"]).is_err()
+        );
+        assert!(
+            CliConfig::try_parse_from(["conda-mirror", "--timestamp-policy", "bogus"]).is_err()
+        );
     }
 }

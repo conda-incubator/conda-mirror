@@ -1,0 +1,10 @@
+source: conda-forge
+destination: ./conda-forge-fs-mirror
+
+# only mirror packages indexed between these two instants (inclusive)
+exclude-older: 2023-01-01
+exclude-newer: 2025-10-01T00:00:00Z
+# or relative to now, e.g. `exclude-newer: 14d`
+
+# allow-missing | require-timestamp (default) | require-indexed-timestamp
+timestamp-policy: require-timestamp
