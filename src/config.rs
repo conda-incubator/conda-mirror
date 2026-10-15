@@ -28,10 +28,6 @@ pub struct CliConfig {
     #[arg(long)]
     pub subdir: Option<Vec<Subdir>>,
 
-    /// The proxy url
-    #[arg(long)]
-    pub proxy: Option<String>,
-
     /// The configuration file to use.
     #[arg(short, long)]
     pub config: Option<PathBuf>,

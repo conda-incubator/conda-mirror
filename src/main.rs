@@ -75,12 +75,6 @@ async fn main() -> miette::Result<()> {
         yaml_config.subdirs.clone()
     };
 
-    let proxy = if let Some(proxy) = cli_config.proxy {
-        Some(proxy)
-    } else {
-        yaml_config.proxy.clone()
-    };
-
     let max_retries = if let Some(max_retries) = yaml_config.max_retries {
         max_retries
     } else {
@@ -162,7 +156,7 @@ async fn main() -> miette::Result<()> {
         mode,
         max_retries,
         max_parallel,
-        proxy,
+        yaml_config.proxy.clone(),
         cli_config.no_progress,
         s3_config_source,
         s3_config_destination,
