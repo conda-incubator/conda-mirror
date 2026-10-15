@@ -384,27 +384,30 @@ pub async fn mirror(config: CondaMirrorConfig) -> miette::Result<()> {
     Ok(())
 }
 
+/// Whether `record` is selected by the include/exclude configuration.
+fn matches_mode(mode: &MirrorMode, record: &PackageRecord) -> bool {
+    match mode {
+        MirrorMode::All => true,
+        MirrorMode::OnlyInclude(include) => include.iter().any(|i| i.matches(record)),
+        MirrorMode::AllButExclude(exclude) => !exclude.iter().any(|e| e.matches(record)),
+        // `include` overrides `exclude`: a package is mirrored if it matches an include
+        // pattern or if it matches no exclude pattern.
+        MirrorMode::IncludeExclude(include, exclude) => {
+            include.iter().any(|i| i.matches(record)) || !exclude.iter().any(|e| e.matches(record))
+        }
+    }
+}
+
 fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
 ) -> HashMap<DistArchiveIdentifier, PackageRecord> {
-    let all_packages = repodata.packages.into_iter().chain(repodata.conda_packages);
-    match config.mode.clone() {
-        MirrorMode::All => all_packages.collect(),
-        MirrorMode::OnlyInclude(include) => all_packages
-            .filter(|pkg| include.iter().any(|i| i.matches(&pkg.1)))
-            .collect(),
-        MirrorMode::AllButExclude(exclude) => all_packages
-            .filter(|pkg| !exclude.iter().any(|i| i.matches(&pkg.1)))
-            .collect(),
-        MirrorMode::IncludeExclude(include, exclude) => all_packages
-            .filter(|pkg| {
-                !exclude
-                    .iter()
-                    .any(|i| i.matches(&pkg.1) || include.iter().any(|i| i.matches(&pkg.1)))
-            })
-            .collect(),
-    }
+    repodata
+        .packages
+        .into_iter()
+        .chain(repodata.conda_packages)
+        .filter(|(_, record)| matches_mode(&config.mode, record))
+        .collect()
 }
 
 enum BytesStream {
@@ -1042,4 +1045,70 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
 
     let authenticated_client = client_builder.build();
     Ok(authenticated_client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rattler_conda_types::{
+        MatchSpec, PackageName, ParseStrictness, ParseStrictnessWithNameMatcher, Version,
+    };
+    use std::str::FromStr;
+
+    fn record(name: &str) -> PackageRecord {
+        PackageRecord::new(
+            PackageName::new_unchecked(name),
+            Version::from_str("1.0").unwrap(),
+            "0".to_string(),
+        )
+    }
+
+    fn specs(specs: &[&str]) -> Vec<MatchSpec> {
+        specs
+            .iter()
+            .map(|s| {
+                MatchSpec::from_str(
+                    s,
+                    ParseStrictnessWithNameMatcher {
+                        parse_strictness: ParseStrictness::Strict,
+                        exact_names_only: false,
+                    },
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mode_all_keeps_everything() {
+        assert!(matches_mode(&MirrorMode::All, &record("foo")));
+    }
+
+    #[test]
+    fn mode_only_include() {
+        let mode = MirrorMode::OnlyInclude(specs(&["foo"]));
+        assert!(matches_mode(&mode, &record("foo")));
+        assert!(!matches_mode(&mode, &record("bar")));
+    }
+
+    #[test]
+    fn mode_all_but_exclude() {
+        let mode = MirrorMode::AllButExclude(specs(&["foo"]));
+        assert!(!matches_mode(&mode, &record("foo")));
+        assert!(matches_mode(&mode, &record("bar")));
+    }
+
+    #[test]
+    fn mode_include_overrides_exclude() {
+        // Exclude everything except `foo`.
+        let mode = MirrorMode::IncludeExclude(specs(&["foo"]), specs(&["*"]));
+        assert!(matches_mode(&mode, &record("foo")));
+        assert!(!matches_mode(&mode, &record("bar")));
+
+        // Packages matching neither list are mirrored.
+        let mode = MirrorMode::IncludeExclude(specs(&["foo"]), specs(&["bar"]));
+        assert!(matches_mode(&mode, &record("foo")));
+        assert!(!matches_mode(&mode, &record("bar")));
+        assert!(matches_mode(&mode, &record("baz")));
+    }
 }
