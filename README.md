@@ -146,6 +146,19 @@ subdirs:
   - win-64
 ```
 
+#### Proxy configuration
+
+Source HTTP requests use the `[proxy-config]` settings from Pixi-compatible global configuration files, such as `~/.pixi/config.toml`, `$PIXI_HOME/config.toml`, or the shared rattler configuration at `~/.config/rattler/config.toml` on Linux. Pixi does not need to be installed.
+
+```toml
+[proxy-config]
+http = "http://proxy.example.com:8080/"
+https = "http://proxy.example.com:8080/"
+non-proxy-hosts = ["localhost", "127.0.0.1", "[::1]"]
+```
+
+Standard proxy environment variables take precedence over these settings. `NO_PROXY` (or `no_proxy`) overrides the configured exclusion list. Mirror-specific settings continue to use the YAML file passed to `--config`.
+
 #### S3 configuration
 
 When using S3, you can configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.

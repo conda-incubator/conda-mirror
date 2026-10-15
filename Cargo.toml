@@ -16,9 +16,11 @@ miette = { version = "7.6.0", features = ["fancy"] }
 number_prefix = "0.4.0"
 opendal = { version = "0.57.0", features = ["services-fs", "services-s3"] }
 rattler_conda_types = "0.55.0"
+rattler_config = { version = "0.8.0", default-features = false }
 rattler_digest = "2.0.0"
 rattler_index = { version = "0.32.0", default-features = false }
 rattler_networking = { version = "0.31.0", default-features = false, features = [
+  "rattler_config",
   "s3",
 ] }
 rattler_repodata_gateway = { version = "0.34.0", default-features = false }
