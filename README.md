@@ -92,6 +92,10 @@ You can mirror to multiple destination backends as well, namely:
 - filesystem: `--destination ./conda-forge-local`
 - s3: `--destination s3://my-destination-bucket/channel`
 
+For filesystem destinations, newly copied package files retain the source file's modification time or the upstream HTTP `Last-Modified` timestamp when available.
+Missing or invalid HTTP timestamps leave the normal write time in place. Existing package files are skipped, so their timestamps are not updated.
+Repodata is regenerated and keeps its generated modification time. S3 assigns its own object modification times.
+
 #### Configuration file
 
 For more control like including only specific packages, you can use a configuration file and pass them to `conda-mirror` using `--config my-config.yml`.

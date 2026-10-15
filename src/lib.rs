@@ -28,7 +28,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
 use tokio::{fs::File, sync::Semaphore, task::JoinError};
@@ -150,6 +150,10 @@ pub enum MirrorPackageErrorKind {
     FileOpen(PathBuf, #[source] std::io::Error),
     #[error("failed to read file {0}: {1}")]
     FileRead(PathBuf, #[source] std::io::Error),
+    #[error("failed to read metadata for {0}: {1}")]
+    FileMetadata(PathBuf, #[source] std::io::Error),
+    #[error("failed to set modification time for {0}: {1}")]
+    SetMtime(PathBuf, #[source] std::io::Error),
     #[error("failed to send request to {0}: {1}")]
     SendRequest(Url, #[source] reqwest_middleware::Error),
     #[error("failed to get response from {0}: {1}")]
@@ -536,6 +540,16 @@ async fn dispatch_tasks_delete(
     Ok(())
 }
 
+async fn set_file_mtime(path: PathBuf, modified: SystemTime) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_modified(modified)
+    })
+    .await?
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 async fn dispatch_tasks_add(
@@ -583,16 +597,27 @@ async fn dispatch_tasks_add(
                 console::style(&filename).dim()
             ));
 
+            let preserve_mtime = op.info().scheme() == "fs";
             // use rattler client for downloading the package
-            let mut stream: BytesStream = if package_url.scheme() == "file" {
+            let (mut stream, modified) = if package_url.scheme() == "file" {
                 let path = package_url.to_file_path().unwrap();
                 let file = tokio::fs::File::open(&path)
                     .await
                     .map_err(|e| MirrorPackageErrorKind::FileOpen(path.clone(), e))
                     .with_filename(&filename)?;
+                let modified = if preserve_mtime {
+                    file.metadata()
+                        .await
+                        .map_err(|e| MirrorPackageErrorKind::FileMetadata(path.clone(), e))
+                        .with_filename(&filename)?
+                        .modified()
+                        .ok()
+                } else {
+                    None
+                };
                 let read =
                     tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new());
-                BytesStream::File(path, read)
+                (BytesStream::File(path, read), modified)
             } else {
                 let response = client
                     .get(package_url.clone())
@@ -607,7 +632,15 @@ async fn dispatch_tasks_add(
                     })
                     .with_filename(&filename);
                 }
-                BytesStream::Reqwest(package_url, Box::pin(response.bytes_stream()))
+                let modified = response
+                    .headers()
+                    .get(reqwest::header::LAST_MODIFIED)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| httpdate::parse_http_date(value).ok());
+                (
+                    BytesStream::Reqwest(package_url, Box::pin(response.bytes_stream())),
+                    modified,
+                )
             };
 
             let mut hasher = Sha256::default();
@@ -677,8 +710,17 @@ async fn dispatch_tasks_add(
             writer
                 .close()
                 .await
-                .map_err(|e| MirrorPackageErrorKind::Upload(destination_path, e))
+                .map_err(|e| MirrorPackageErrorKind::Upload(destination_path.clone(), e))
                 .with_filename(&filename)?;
+
+            // OpenDAL may publish the file on close, so restore mtime afterwards.
+            if preserve_mtime && let Some(modified) = modified {
+                let path = PathBuf::from(op.info().root()).join(&destination_path);
+                set_file_mtime(path.clone(), modified)
+                    .await
+                    .map_err(|e| MirrorPackageErrorKind::SetMtime(path, e))
+                    .with_filename(&filename)?;
+            }
             pb.inc(1);
 
             let mut speed_bar_guard = speed_tracker_bar.lock().await;
