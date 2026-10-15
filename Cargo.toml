@@ -1,27 +1,12 @@
 [package]
 name = "conda-mirror"
-description = "Mirror conda channels"
 version = "0.12.3"
 edition = "2024"
-
-[features]
-default = ["native-tls"]
-native-tls = [
-  "rattler_networking/native-tls",
-  "rattler_repodata_gateway/native-tls",
-  "rattler_index/native-tls",
-  "reqwest/native-tls",
-]
-rustls-tls = [
-  "rattler_networking/rustls",
-  "rattler_repodata_gateway/rustls",
-  "rattler_index/rustls",
-  "reqwest/rustls",
-]
+description = "Mirror conda channels"
 
 [dependencies]
 bytes = "1.12.1"
-clap = { version = "4.6.7", features = ["derive", "string", "env"] }
+clap = { version = "4.6.7", features = ["derive", "env", "string"] }
 clap-verbosity-flag = { version = "3.0.4", features = ["tracing"] }
 console = "0.16.6"
 futures = "0.3.34"
@@ -29,20 +14,24 @@ hex = "0.4.3"
 indicatif = "0.18.6"
 miette = { version = "7.6.0", features = ["fancy"] }
 number_prefix = "0.4.0"
-opendal = { version = "0.57.0", features = ["services-s3", "services-fs"] }
+opendal = { version = "0.57.0", features = ["services-fs", "services-s3"] }
 rattler_conda_types = "0.55.0"
+rattler_config = { version = "0.8.0", default-features = false }
 rattler_digest = "2.0.0"
 rattler_index = { version = "0.32.0", default-features = false }
-rattler_networking = { version = "0.31.0", features = [
+rattler_networking = { version = "0.31.0", default-features = false, features = [
+  "rattler_config",
   "s3",
-], default-features = false }
+] }
 rattler_repodata_gateway = { version = "0.34.0", default-features = false }
 rattler_s3 = { version = "0.3.0", features = ["opendal"] }
-reqwest = { version = "0.13.5", features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "socks",
   "stream",
-], default-features = false }
-reqwest-middleware = { version = "0.5.1", package = "astral-reqwest-middleware" }
-reqwest-retry = { version = "0.9.1", package = "astral-reqwest-retry" }
+  "system-proxy",
+] }
+reqwest-middleware = { package = "astral-reqwest-middleware", version = "0.5.1" }
+reqwest-retry = { package = "astral-reqwest-retry", version = "0.9.1" }
 serde = "1.0.229"
 serde_json = "1.0.151"
 serde_yml = "0.0.12"
@@ -56,3 +45,18 @@ tracing-subscriber = { version = "0.3.23", features = [
   "env-filter",
 ] }
 url = "2.5.8"
+
+[features]
+default = ["native-tls"]
+native-tls = [
+  "rattler_index/native-tls",
+  "rattler_networking/native-tls",
+  "rattler_repodata_gateway/native-tls",
+  "reqwest/native-tls",
+]
+rustls-tls = [
+  "rattler_index/rustls",
+  "rattler_networking/rustls",
+  "rattler_repodata_gateway/rustls",
+  "reqwest/rustls",
+]

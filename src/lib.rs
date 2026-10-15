@@ -7,10 +7,11 @@ use rattler_conda_types::{
     ChannelConfig, Matches, NamedChannelOrUrl, PackageRecord, RepoData, Subdir,
     package::{CondaArchiveType, DistArchiveIdentifier, DistArchiveType},
 };
+use rattler_config::{Config, ConfigBase, NoExtension, config::proxy::ProxyConfig};
 use rattler_digest::Sha256Hash;
 use rattler_index::{PreconditionChecks, RepodataMetadataCollection, write_repodata};
 use rattler_networking::{
-    AuthenticationMiddleware, AuthenticationStorage, S3Middleware,
+    AuthenticationMiddleware, AuthenticationStorage, S3Middleware, proxy::proxies_from_config,
     retry_policies::ExponentialBackoff,
 };
 use rattler_s3::S3CredentialSource;
@@ -991,12 +992,26 @@ async fn get_subdirs(
 }
 
 async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware> {
-    let client = Client::builder()
+    let pixi_config =
+        ConfigBase::<NoExtension>::load_from_default_locations("pixi").into_diagnostic()?;
+    let proxy_config = pixi_config
+        .common
+        .proxy_config
+        .merge_config(&ProxyConfig::from_env())
+        .into_diagnostic()?;
+
+    let mut client = Client::builder()
         .pool_max_idle_per_host(20)
         .user_agent(format!("conda-mirror/{}", env!("CARGO_PKG_VERSION")))
-        .read_timeout(Duration::from_secs(30))
-        .build()
-        .expect("failed to create reqwest Client");
+        .read_timeout(Duration::from_secs(30));
+    let no_proxy = reqwest::NoProxy::from_env();
+    for mut proxy in proxies_from_config(&proxy_config).into_diagnostic()? {
+        if let Some(no_proxy) = &no_proxy {
+            proxy = proxy.no_proxy(Some(no_proxy.clone()));
+        }
+        client = client.proxy(proxy);
+    }
+    let client = client.build().into_diagnostic()?;
     let mut client_builder = ClientBuilder::new(client.clone());
 
     let auth_store = AuthenticationStorage::from_env_and_defaults().into_diagnostic()?;
