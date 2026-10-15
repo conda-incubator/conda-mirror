@@ -120,18 +120,21 @@ include:
   - jupyter*[license="MIT"]
 ```
 
-Exclude all packages defined in `exclude`, override this behavior by specifying overrides in `include`:
+Exclude all packages defined in `exclude`, override this behavior by specifying overrides in `include`.
+Packages that match neither list are mirrored:
 
 ```yml
 source: conda-forge
 destination: ./my-channel
 
-include:
-  - jupyter*
 exclude:
-  - jupyter-fs
+  - "*[license=GPL-3.0-or-later]"
   # you can also use regex in MatchSpecs (needs to start with ^ and end with $)
   - ^jupyter-ai.*$
+# mirror these even though they match an exclude pattern
+include:
+  - asgal
+  - jupyter-ai-core
 ```
 
 Only mirror certain subdirs:
