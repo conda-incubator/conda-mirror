@@ -28,6 +28,10 @@ pub struct CliConfig {
     #[arg(long)]
     pub subdir: Option<Vec<Subdir>>,
 
+    /// The proxy url
+    #[arg(long)]
+    pub proxy: Option<String>,
+
     /// The configuration file to use.
     #[arg(short, long)]
     pub config: Option<PathBuf>,
@@ -181,6 +185,7 @@ pub struct CondaMirrorYamlConfig {
     pub destination: Option<NamedChannelOrUrl>,
     pub subdirs: Option<Vec<Subdir>>,
 
+    pub proxy: Option<String>,
     pub max_retries: Option<u8>,
     pub max_parallel: Option<u8>,
 
@@ -213,6 +218,7 @@ pub struct CondaMirrorConfig {
     pub mode: MirrorMode,
     pub max_retries: u8,
     pub max_parallel: u8,
+    pub proxy: Option<String>,
     pub no_progress: bool,
     pub s3_config_source: Option<S3Config>,
     pub s3_config_destination: Option<S3Config>,
@@ -232,6 +238,7 @@ impl CondaMirrorConfig {
         mode: MirrorMode,
         max_retries: u8,
         max_parallel: u8,
+        proxy: Option<String>,
         no_progress: bool,
         s3_config_source: Option<S3Config>,
         s3_config_destination: Option<S3Config>,
@@ -258,6 +265,7 @@ impl CondaMirrorConfig {
             s3_credentials_source,
             s3_credentials_destination,
             channel_source,
+            proxy,
             precondition_checks,
         })
     }

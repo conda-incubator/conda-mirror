@@ -988,10 +988,15 @@ async fn get_subdirs(
 }
 
 async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMiddleware> {
-    let client = Client::builder()
+    let mut client = Client::builder()
         .pool_max_idle_per_host(20)
         .user_agent(format!("conda-mirror/{}", env!("CARGO_PKG_VERSION")))
-        .read_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30));
+    if let Some(proxy) = &config.proxy {
+        let proxy = reqwest::Proxy::all(proxy).expect("invalid proxy").no_proxy(reqwest::NoProxy::from_env());
+        client = client.proxy(proxy);
+    }
+    let client = client
         .build()
         .expect("failed to create reqwest Client");
     let mut client_builder = ClientBuilder::new(client.clone());
