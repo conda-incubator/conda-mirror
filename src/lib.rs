@@ -41,7 +41,7 @@ use url::Url;
 
 pub mod config;
 mod s3;
-use config::{CondaMirrorConfig, MirrorMode};
+use config::{CondaMirrorConfig, MirrorMode, TimeFilter};
 use s3::resolve_s3_credential_source;
 
 #[derive(Clone, Debug)]
@@ -398,16 +398,37 @@ fn matches_mode(mode: &MirrorMode, record: &PackageRecord) -> bool {
     }
 }
 
+/// Apply the include/exclude configuration and then the time window to
+/// `records`. Also returns how many packages the time window excluded.
+fn filter_packages(
+    records: impl IntoIterator<Item = (DistArchiveIdentifier, PackageRecord)>,
+    mode: &MirrorMode,
+    time_filter: &TimeFilter,
+) -> (HashMap<DistArchiveIdentifier, PackageRecord>, usize) {
+    let mut excluded_by_time = 0;
+    let packages = records
+        .into_iter()
+        .filter(|(_, record)| matches_mode(mode, record))
+        .filter(|(_, record)| {
+            let included = time_filter.includes(record);
+            if !included {
+                excluded_by_time += 1;
+            }
+            included
+        })
+        .collect();
+    (packages, excluded_by_time)
+}
+
 fn get_packages_to_mirror(
     repodata: RepoData,
     config: &CondaMirrorConfig,
-) -> HashMap<DistArchiveIdentifier, PackageRecord> {
-    repodata
-        .packages
-        .into_iter()
-        .chain(repodata.conda_packages)
-        .filter(|(_, record)| matches_mode(&config.mode, record))
-        .collect()
+) -> (HashMap<DistArchiveIdentifier, PackageRecord>, usize) {
+    filter_packages(
+        repodata.packages.into_iter().chain(repodata.conda_packages),
+        &config.mode,
+        &config.time_filter,
+    )
 }
 
 enum BytesStream {
@@ -838,7 +859,12 @@ async fn mirror_subdir(
             repodata.v3.records().count()
         );
     }
-    let packages_to_mirror = get_packages_to_mirror(repodata, &config);
+    let (packages_to_mirror, excluded_by_time) = get_packages_to_mirror(repodata, &config);
+    if config.time_filter.is_active() {
+        info!(
+            "Excluded {excluded_by_time} packages in {subdir} because their timestamp was not in range"
+        );
+    }
     tracing::info!(
         "Mirroring {} packages in {}",
         packages_to_mirror.len(),
@@ -1050,10 +1076,13 @@ async fn get_client(config: &CondaMirrorConfig) -> miette::Result<ClientWithMidd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use config::TimestampPolicy;
+    use jiff::Timestamp;
     use rattler_conda_types::{
         MatchSpec, PackageName, ParseStrictness, ParseStrictnessWithNameMatcher, Version,
+        utils::TimestampMs,
     };
-    use std::str::FromStr;
+    use std::{collections::BTreeSet, str::FromStr};
 
     fn record(name: &str) -> PackageRecord {
         PackageRecord::new(
@@ -1061,6 +1090,47 @@ mod tests {
             Version::from_str("1.0").unwrap(),
             "0".to_string(),
         )
+    }
+
+    fn seconds(seconds: i64) -> Timestamp {
+        Timestamp::from_second(seconds).unwrap()
+    }
+
+    /// A record keyed by its filename, with optional `timestamp` and
+    /// `indexed_timestamp` in seconds since the epoch.
+    fn timed_record(
+        filename: &str,
+        timestamp: Option<i64>,
+        indexed_timestamp: Option<i64>,
+    ) -> (DistArchiveIdentifier, PackageRecord) {
+        let identifier = DistArchiveIdentifier::try_from_filename(filename).unwrap();
+        let mut record = record(&identifier.identifier.name);
+        record.timestamp = timestamp.map(|s| TimestampMs::from(seconds(s)));
+        record.indexed_timestamp = indexed_timestamp.map(|s| TimestampMs::from(seconds(s)));
+        (identifier, record)
+    }
+
+    fn time_filter(
+        exclude_newer: Option<i64>,
+        exclude_older: Option<i64>,
+        policy: TimestampPolicy,
+    ) -> TimeFilter {
+        TimeFilter {
+            exclude_newer: exclude_newer.map(seconds),
+            exclude_older: exclude_older.map(seconds),
+            policy,
+        }
+    }
+
+    fn filenames(packages: &HashMap<DistArchiveIdentifier, PackageRecord>) -> BTreeSet<String> {
+        packages
+            .keys()
+            .map(DistArchiveIdentifier::to_file_name)
+            .collect()
+    }
+
+    fn names(filenames: &[&str]) -> BTreeSet<String> {
+        filenames.iter().map(|s| s.to_string()).collect()
     }
 
     fn specs(specs: &[&str]) -> Vec<MatchSpec> {
@@ -1110,5 +1180,130 @@ mod tests {
         assert!(matches_mode(&mode, &record("foo")));
         assert!(!matches_mode(&mode, &record("bar")));
         assert!(matches_mode(&mode, &record("baz")));
+    }
+
+    #[test]
+    fn inactive_time_filter_keeps_everything() {
+        let records = vec![
+            timed_record("a-1.0-0.conda", Some(100), None),
+            timed_record("b-1.0-0.conda", None, None),
+        ];
+        let filter = time_filter(None, None, TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(
+            filenames(&packages),
+            names(&["a-1.0-0.conda", "b-1.0-0.conda"])
+        );
+        assert_eq!(excluded, 0);
+    }
+
+    #[test]
+    fn exclude_newer_is_inclusive() {
+        let records = vec![
+            timed_record("before-1.0-0.conda", Some(999), None),
+            timed_record("at-1.0-0.conda", Some(1000), None),
+            timed_record("after-1.0-0.conda", Some(1001), None),
+        ];
+        let filter = time_filter(Some(1000), None, TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(
+            filenames(&packages),
+            names(&["at-1.0-0.conda", "before-1.0-0.conda"])
+        );
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn exclude_older_is_inclusive() {
+        let records = vec![
+            timed_record("before-1.0-0.conda", Some(999), None),
+            timed_record("at-1.0-0.conda", Some(1000), None),
+            timed_record("after-1.0-0.conda", Some(1001), None),
+        ];
+        let filter = time_filter(None, Some(1000), TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(
+            filenames(&packages),
+            names(&["after-1.0-0.conda", "at-1.0-0.conda"])
+        );
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn both_bounds_keep_the_window() {
+        let records = vec![
+            timed_record("old-1.0-0.conda", Some(10), None),
+            timed_record("mid-1.0-0.conda", Some(50), None),
+            timed_record("new-1.0-0.conda", Some(90), None),
+        ];
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(filenames(&packages), names(&["mid-1.0-0.conda"]));
+        assert_eq!(excluded, 2);
+    }
+
+    #[test]
+    fn indexed_timestamp_wins_over_timestamp() {
+        let records = vec![
+            // Built long ago, indexed inside the window.
+            timed_record("indexed-in-1.0-0.conda", Some(10), Some(50)),
+            // Built inside the window, indexed after it.
+            timed_record("indexed-out-1.0-0.conda", Some(50), Some(90)),
+        ];
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(filenames(&packages), names(&["indexed-in-1.0-0.conda"]));
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn require_timestamp_drops_records_without_any_timestamp() {
+        let records = vec![
+            timed_record("none-1.0-0.conda", None, None),
+            timed_record("build-only-1.0-0.conda", Some(50), None),
+        ];
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(filenames(&packages), names(&["build-only-1.0-0.conda"]));
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn require_indexed_timestamp_ignores_build_timestamp() {
+        let records = vec![
+            timed_record("build-only-1.0-0.conda", Some(50), None),
+            timed_record("indexed-1.0-0.conda", Some(10), Some(50)),
+        ];
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::RequireIndexedTimestamp);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(filenames(&packages), names(&["indexed-1.0-0.conda"]));
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn allow_missing_keeps_records_without_timestamp() {
+        let records = vec![
+            timed_record("none-1.0-0.conda", None, None),
+            timed_record("old-1.0-0.conda", Some(10), None),
+        ];
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::AllowMissing);
+        let (packages, excluded) = filter_packages(records, &MirrorMode::All, &filter);
+        assert_eq!(filenames(&packages), names(&["none-1.0-0.conda"]));
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn time_filter_runs_after_include_exclude() {
+        // `foo` has no timestamp but is already dropped by the include list, so it
+        // must not be counted as excluded by the time window.
+        let records = vec![
+            timed_record("foo-1.0-0.conda", None, None),
+            timed_record("bar-1.0-0.conda", Some(50), None),
+        ];
+        let mode = MirrorMode::OnlyInclude(specs(&["bar"]));
+        let filter = time_filter(Some(80), Some(20), TimestampPolicy::RequireTimestamp);
+        let (packages, excluded) = filter_packages(records, &mode, &filter);
+        assert_eq!(filenames(&packages), names(&["bar-1.0-0.conda"]));
+        assert_eq!(excluded, 0);
     }
 }

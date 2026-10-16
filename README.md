@@ -149,6 +149,28 @@ subdirs:
   - win-64
 ```
 
+#### Time-based filtering
+
+Only mirror packages from a time window (inclusive, applied on top of `include` and `exclude`):
+
+```yml
+source: conda-forge
+destination: ./my-channel
+
+# same formats as pixi's `exclude-newer`: a duration ("7d", "1h30m"),
+# a date ("2025-10-01", includes the whole day) or an RFC 3339 timestamp
+exclude-newer: 2025-10-01T00:00:00Z
+exclude-older: 2023-01-01
+
+# which timestamp to compare, and what to do with packages that have none:
+# allow-missing | require-timestamp (default) | require-indexed-timestamp
+timestamp-policy: require-timestamp
+```
+
+The server-assigned `indexed_timestamp` ([CEP 47](https://github.com/conda/ceps/blob/main/cep-0047.md)) is preferred over the builder-controlled `timestamp`.
+`require-indexed-timestamp` only uses the former, `allow-missing` also mirrors packages without any timestamp.
+All three settings are also available as CLI flags.
+
 #### S3 configuration
 
 When using S3, you can configure the S3 endpoint by setting the region, endpoint url, and whether to use path-style addressing.

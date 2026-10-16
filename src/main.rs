@@ -5,6 +5,7 @@ use url::Url;
 use conda_mirror::{
     config::{
         CliConfig, CondaMirrorConfig, CondaMirrorYamlConfig, MirrorMode, S3Config, S3Credentials,
+        TimeFilter,
     },
     mirror,
 };
@@ -92,6 +93,15 @@ async fn main() -> miette::Result<()> {
         .or(yaml_config.precondition_checks)
         .unwrap_or(true);
 
+    // The CLI takes precedence over the configuration file, key by key. `now` is
+    // taken once so that every subdir is filtered with the same cutoffs.
+    let time_filter = TimeFilter::new(
+        cli_config.exclude_newer.or(yaml_config.exclude_newer),
+        cli_config.exclude_older.or(yaml_config.exclude_older),
+        cli_config.timestamp_policy.or(yaml_config.timestamp_policy),
+        jiff::Timestamp::now(),
+    )?;
+
     let mode = match (yaml_config.include, yaml_config.exclude) {
         (Some(include), Some(exclude)) => MirrorMode::IncludeExclude(
             include.into_iter().map(|spec| spec.0).collect(),
@@ -162,6 +172,7 @@ async fn main() -> miette::Result<()> {
         s3_credentials_source,
         s3_credentials_destination,
         precondition_checks,
+        time_filter,
     )?;
 
     tracing::info!("Using configuration: {:?}", config);
