@@ -296,19 +296,6 @@ impl TimeCutoff {
     }
 }
 
-/// The outcome of checking a package record against a [`TimeFilter`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeVerdict {
-    /// The record is inside the window (or no cutoff is configured).
-    Keep,
-    /// The record has no usable timestamp but the policy lets it pass.
-    KeepMissingTimestamp,
-    /// The record is outside the window.
-    DropOutOfRange,
-    /// The record has no usable timestamp and the policy excludes it.
-    DropMissingTimestamp,
-}
-
 /// Resolved time window that packages must fall into to be mirrored. Both
 /// bounds are inclusive.
 #[derive(Debug, Clone, Copy, Default)]
@@ -351,12 +338,6 @@ impl TimeFilter {
                 "timestamp-policy is set but neither exclude-newer nor exclude-older is, it has no effect"
             );
         }
-        if let Some(newer) = exclude_newer {
-            tracing::info!("Excluding packages newer than {newer}");
-        }
-        if let Some(older) = exclude_older {
-            tracing::info!("Excluding packages older than {older}");
-        }
         Ok(filter)
     }
 
@@ -377,23 +358,18 @@ impl TimeFilter {
         timestamp.as_ref().map(TimestampMs::jiff_timestamp)
     }
 
-    /// Check `record` against the time window.
-    pub fn verdict(&self, record: &PackageRecord) -> TimeVerdict {
+    /// Whether `record` falls inside the time window. Records without a usable
+    /// timestamp are only included under [`TimestampPolicy::AllowMissing`].
+    pub fn includes(&self, record: &PackageRecord) -> bool {
         if !self.is_active() {
-            return TimeVerdict::Keep;
+            return true;
         }
         match self.effective_timestamp(record) {
-            None if self.policy == TimestampPolicy::AllowMissing => {
-                TimeVerdict::KeepMissingTimestamp
+            None => self.policy == TimestampPolicy::AllowMissing,
+            Some(timestamp) => {
+                self.exclude_newer.is_none_or(|newer| timestamp <= newer)
+                    && self.exclude_older.is_none_or(|older| timestamp >= older)
             }
-            None => TimeVerdict::DropMissingTimestamp,
-            Some(timestamp)
-                if self.exclude_newer.is_some_and(|newer| timestamp > newer)
-                    || self.exclude_older.is_some_and(|older| timestamp < older) =>
-            {
-                TimeVerdict::DropOutOfRange
-            }
-            Some(_) => TimeVerdict::Keep,
         }
     }
 }
