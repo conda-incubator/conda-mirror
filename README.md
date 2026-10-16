@@ -161,8 +161,8 @@ destination: ./my-channel
 include:
   - "python*"
 
-# RFC 3339 ("2025-10-01T00:00:00Z"), a date ("2025-10-01", midnight UTC),
-# or a span relative to now ("14d", "2 weeks", "1y 6 months")
+# a duration relative to now ("7d", "1h30m"), a date ("2025-10-01")
+# or an RFC 3339 timestamp ("2025-10-01T00:00:00Z")
 exclude-newer: 2025-10-01T00:00:00Z
 exclude-older: 2023-01-01
 
@@ -170,8 +170,13 @@ exclude-older: 2023-01-01
 timestamp-policy: require-timestamp
 ```
 
+The cutoffs accept the same formats as [pixi's `exclude-newer`](https://pixi.sh/latest/reference/pixi_manifest/#exclude-newer-optional):
+
+- A relative duration (e.g. `7d`, `1h30m`, `2 weeks`), supporting everything [`humantime`](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) accepts. It is resolved against the current time once when `conda-mirror` starts.
+- A date in `YYYY-MM-DD` format. The whole day is inside the window: `exclude-newer: 2025-10-01` means `2025-10-02T00:00:00Z` and `exclude-older: 2025-10-01` means `2025-10-01T00:00:00Z`.
+- An [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339.html) timestamp (e.g. `2025-10-01T00:00:00Z`).
+
 The same settings are available as `--exclude-newer`, `--exclude-older` and `--timestamp-policy` on the command line, which take precedence over the configuration file.
-Relative cutoffs are resolved once when `conda-mirror` starts.
 
 Packages are compared using their server-assigned `indexed_timestamp` ([CEP 47](https://github.com/conda/ceps/blob/main/cep-0047.md)) when the channel provides it, falling back to the builder-controlled `timestamp` otherwise.
 `timestamp-policy` controls this and what happens to packages that have no usable timestamp:

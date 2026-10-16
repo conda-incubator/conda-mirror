@@ -1,4 +1,4 @@
-use jiff::{Span, Timestamp, civil::Date, tz::TimeZone};
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use miette::IntoDiagnostic;
 use rattler_conda_types::{
     Channel, ChannelConfig, MatchSpec, NamedChannelOrUrl, PackageRecord, ParseStrictness,
@@ -104,9 +104,10 @@ pub struct CliConfig {
     #[arg(long)]
     pub precondition_checks: Option<bool>,
 
-    /// Exclude packages whose timestamp is after this cutoff. Accepts an RFC
-    /// 3339 timestamp (2025-10-01T00:00:00Z), a date (2025-10-01, midnight
-    /// UTC) or a span relative to now (14d, 2 weeks, 1y).
+    /// Exclude packages whose timestamp is after this cutoff. Accepts a
+    /// duration relative to now (7d, 1h30m), a date (2025-10-01, which
+    /// includes the whole day in UTC) or an RFC 3339 timestamp
+    /// (2025-10-01T00:00:00Z). Same formats as pixi's `exclude-newer`.
     #[arg(long, value_name = "CUTOFF")]
     pub exclude_newer: Option<TimeCutoff>,
 
@@ -200,21 +201,39 @@ impl std::fmt::Display for TimestampPolicy {
     }
 }
 
+/// Error returned when a cutoff is in none of the supported formats.
 #[derive(Debug, Error)]
 #[error(
-    "invalid time cutoff {0:?}: expected an RFC 3339 timestamp (2025-10-01T00:00:00Z), \
-     a date (2025-10-01) or a positive span relative to now (14d, 2 weeks, 1y)"
+    "`{input}` is neither a valid duration ({duration}), date ({date}), nor timestamp ({timestamp})"
 )]
-pub struct ParseTimeCutoffError(String);
+pub struct ParseTimeCutoffError {
+    input: String,
+    duration: humantime::DurationError,
+    date: jiff::Error,
+    timestamp: jiff::Error,
+}
 
-/// A point in time as written by the user. Use [`TimeCutoff::resolve`] to turn
-/// it into an instant.
+/// Which bound of the time window a cutoff is resolved for. This matters for
+/// date-only cutoffs, which always include the whole day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutoffBound {
+    /// The cutoff is an `exclude-newer` bound.
+    ExcludeNewer,
+    /// The cutoff is an `exclude-older` bound.
+    ExcludeOlder,
+}
+
+/// A point in time as written by the user, in the same formats pixi accepts
+/// for `exclude-newer`. Use [`TimeCutoff::resolve`] to turn it into an
+/// instant.
 #[derive(Debug, Clone, Copy)]
 pub enum TimeCutoff {
+    /// A duration before "now", e.g. `7d` or `1h30m`.
+    Duration(std::time::Duration),
+    /// A calendar date in UTC. The whole day is inside the window.
+    Date(Date),
     /// An absolute instant.
-    Absolute(Timestamp),
-    /// A span before "now", e.g. `14d`.
-    Relative(Span),
+    Timestamp(Timestamp),
 }
 
 impl FromStr for TimeCutoff {
@@ -222,20 +241,26 @@ impl FromStr for TimeCutoff {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if let Ok(timestamp) = Timestamp::from_str(s) {
-            return Ok(Self::Absolute(timestamp));
-        }
-        if let Ok(date) = Date::from_str(s)
-            && let Ok(zoned) = date.to_zoned(TimeZone::UTC)
-        {
-            return Ok(Self::Absolute(zoned.timestamp()));
-        }
-        if let Ok(span) = Span::from_str(s)
-            && span.is_positive()
-        {
-            return Ok(Self::Relative(span));
-        }
-        Err(ParseTimeCutoffError(s.to_owned()))
+        let duration = match humantime::parse_duration(s) {
+            Ok(duration) => return Ok(Self::Duration(duration)),
+            Err(err) => err,
+        };
+        // The timestamp is tried before the date because jiff's date parser
+        // accepts a full timestamp and silently drops the time part.
+        let timestamp = match Timestamp::from_str(s) {
+            Ok(timestamp) => return Ok(Self::Timestamp(timestamp)),
+            Err(err) => err,
+        };
+        let date = match Date::from_str(s) {
+            Ok(date) => return Ok(Self::Date(date)),
+            Err(err) => err,
+        };
+        Err(ParseTimeCutoffError {
+            input: s.to_owned(),
+            duration,
+            date,
+            timestamp,
+        })
     }
 }
 
@@ -251,12 +276,22 @@ impl<'de> Deserialize<'de> for TimeCutoff {
 }
 
 impl TimeCutoff {
-    /// Resolve the cutoff to an instant. Relative cutoffs are subtracted from
-    /// `now` in UTC.
-    pub fn resolve(self, now: Timestamp) -> Result<Timestamp, jiff::Error> {
+    /// Resolve the cutoff to an instant. Durations are subtracted from `now`.
+    /// A date resolves to the start of the following day for
+    /// [`CutoffBound::ExcludeNewer`] (like pixi) and to the start of the day
+    /// itself for [`CutoffBound::ExcludeOlder`], so the day is always inside
+    /// the window.
+    pub fn resolve(self, now: Timestamp, bound: CutoffBound) -> Result<Timestamp, jiff::Error> {
         match self {
-            Self::Absolute(timestamp) => Ok(timestamp),
-            Self::Relative(span) => Ok(now.to_zoned(TimeZone::UTC).checked_sub(span)?.timestamp()),
+            Self::Duration(duration) => now.checked_sub(duration),
+            Self::Date(date) => {
+                let date = match bound {
+                    CutoffBound::ExcludeNewer => date.tomorrow()?,
+                    CutoffBound::ExcludeOlder => date,
+                };
+                Ok(date.to_zoned(TimeZone::UTC)?.timestamp())
+            }
+            Self::Timestamp(timestamp) => Ok(timestamp),
         }
     }
 }
@@ -292,11 +327,11 @@ impl TimeFilter {
         now: Timestamp,
     ) -> miette::Result<Self> {
         let exclude_newer = exclude_newer
-            .map(|cutoff| cutoff.resolve(now))
+            .map(|cutoff| cutoff.resolve(now, CutoffBound::ExcludeNewer))
             .transpose()
             .into_diagnostic()?;
         let exclude_older = exclude_older
-            .map(|cutoff| cutoff.resolve(now))
+            .map(|cutoff| cutoff.resolve(now, CutoffBound::ExcludeOlder))
             .transpose()
             .into_diagnostic()?;
         if let (Some(older), Some(newer)) = (exclude_older, exclude_newer)
@@ -514,45 +549,85 @@ mod tests {
         utc(2026, 3, 1)
     }
 
-    fn resolve(s: &str) -> Timestamp {
-        s.parse::<TimeCutoff>().unwrap().resolve(now()).unwrap()
+    fn resolve(s: &str, bound: CutoffBound) -> Timestamp {
+        s.parse::<TimeCutoff>()
+            .unwrap()
+            .resolve(now(), bound)
+            .unwrap()
+    }
+
+    fn resolve_newer(s: &str) -> Timestamp {
+        resolve(s, CutoffBound::ExcludeNewer)
+    }
+
+    fn resolve_older(s: &str) -> Timestamp {
+        resolve(s, CutoffBound::ExcludeOlder)
     }
 
     #[test]
     fn parses_rfc3339() {
         assert!(matches!(
             "2025-10-01T00:00:00Z".parse::<TimeCutoff>().unwrap(),
-            TimeCutoff::Absolute(_)
+            TimeCutoff::Timestamp(_)
         ));
-        assert_eq!(resolve("2025-10-01T00:00:00Z"), utc(2025, 10, 1));
-        assert_eq!(resolve("2025-10-01T02:00:00+02:00"), utc(2025, 10, 1));
+        assert_eq!(resolve_newer("2025-10-01T00:00:00Z"), utc(2025, 10, 1));
+        assert_eq!(resolve_older("2025-10-01T00:00:00Z"), utc(2025, 10, 1));
+        assert!(matches!(
+            "2025-10-01T02:00:00+02:00".parse::<TimeCutoff>().unwrap(),
+            TimeCutoff::Timestamp(_)
+        ));
+        assert_eq!(resolve_newer("2025-10-01T02:00:00+02:00"), utc(2025, 10, 1));
+        assert_eq!(
+            resolve_newer("2025-10-01T12:00:00Z"),
+            utc(2025, 10, 1)
+                .checked_add(std::time::Duration::from_secs(12 * 3600))
+                .unwrap()
+        );
     }
 
     #[test]
-    fn parses_date_as_midnight_utc() {
-        assert_eq!(resolve("2025-10-01"), utc(2025, 10, 1));
+    fn parses_date_including_the_whole_day() {
+        assert!(matches!(
+            "2025-10-01".parse::<TimeCutoff>().unwrap(),
+            TimeCutoff::Date(_)
+        ));
+        // Like pixi: `exclude-newer: 2025-10-01` keeps everything from that day.
+        assert_eq!(resolve_newer("2025-10-01"), utc(2025, 10, 2));
+        assert_eq!(resolve_older("2025-10-01"), utc(2025, 10, 1));
     }
 
     #[test]
-    fn parses_relative_spans() {
+    fn parses_humantime_durations() {
         assert!(matches!(
             "14d".parse::<TimeCutoff>().unwrap(),
-            TimeCutoff::Relative(_)
+            TimeCutoff::Duration(_)
         ));
-        assert_eq!(resolve("14d"), utc(2026, 2, 15));
-        assert_eq!(resolve("2 weeks"), utc(2026, 2, 15));
-        assert_eq!(resolve("P14D"), utc(2026, 2, 15));
-        assert_eq!(resolve("1y"), utc(2025, 3, 1));
-        assert_eq!(resolve("1y 6 months"), utc(2024, 9, 1));
+        assert_eq!(resolve_newer("14d"), utc(2026, 2, 15));
+        assert_eq!(resolve_older("14d"), utc(2026, 2, 15));
+        assert_eq!(resolve_newer("2 weeks"), utc(2026, 2, 15));
+        assert_eq!(resolve_newer("7days"), utc(2026, 2, 22));
+        assert_eq!(
+            resolve_newer("1h30m"),
+            now()
+                .checked_sub(std::time::Duration::from_secs(90 * 60))
+                .unwrap()
+        );
+        assert_eq!(resolve_newer("0d"), now());
     }
 
     #[test]
     fn rejects_invalid_cutoffs() {
-        for input in ["", "yesterday", "2025-13-01", "14", "-3d", "0d", "14d ago"] {
-            assert!(
-                input.parse::<TimeCutoff>().is_err(),
-                "{input:?} should be rejected"
-            );
+        for input in [
+            "",
+            "yesterday",
+            "2025-13-01",
+            "14",
+            "-3d",
+            "P14D",
+            "14d ago",
+        ] {
+            let err = input.parse::<TimeCutoff>().unwrap_err().to_string();
+            assert!(err.contains("neither a valid duration"), "{input:?}: {err}");
         }
     }
 
@@ -568,12 +643,14 @@ mod tests {
         let newer = "2024-01-01".parse().unwrap();
         let older = "2025-01-01".parse().unwrap();
         assert!(TimeFilter::new(Some(newer), Some(older), None, now()).is_err());
-        // Equal bounds are a valid, single-instant window.
-        assert!(TimeFilter::new(Some(newer), Some(newer), None, now()).is_ok());
+        // The same date on both bounds is a valid one-day window.
+        let filter = TimeFilter::new(Some(newer), Some(newer), None, now()).unwrap();
+        assert_eq!(filter.exclude_older, Some(utc(2024, 1, 1)));
+        assert_eq!(filter.exclude_newer, Some(utc(2024, 1, 2)));
     }
 
     #[test]
-    fn yaml_accepts_unquoted_dates_and_spans() {
+    fn yaml_accepts_unquoted_dates_and_durations() {
         let config: CondaMirrorYamlConfig = serde_yml::from_str(
             "exclude-newer: 14d\nexclude-older: 2025-10-01\ntimestamp-policy: allow-missing\n",
         )
@@ -630,11 +707,17 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            cli.exclude_newer.unwrap().resolve(now()).unwrap(),
+            cli.exclude_newer
+                .unwrap()
+                .resolve(now(), CutoffBound::ExcludeNewer)
+                .unwrap(),
             utc(2026, 2, 15)
         );
         assert_eq!(
-            cli.exclude_older.unwrap().resolve(now()).unwrap(),
+            cli.exclude_older
+                .unwrap()
+                .resolve(now(), CutoffBound::ExcludeOlder)
+                .unwrap(),
             utc(2023, 1, 1)
         );
         assert_eq!(
