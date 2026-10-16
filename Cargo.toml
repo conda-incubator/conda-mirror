@@ -34,11 +34,11 @@ jiff = { version = "0.2.37", default-features = false, features = [
 ] }
 miette = { version = "7.6.0", features = ["fancy"] }
 number_prefix = "0.4.0"
-opendal = { version = "0.57.0", features = ["services-s3", "services-fs"] }
-rattler_conda_types = "0.55.0"
+opendal = { version = "0.59.4", features = ["services-s3", "services-fs"] }
+rattler_conda_types = "0.56.0"
 rattler_digest = "2.0.0"
 rattler_index = { version = "0.32.0", default-features = false }
-rattler_networking = { version = "0.31.0", features = [
+rattler_networking = { version = "0.34.1", features = [
   "s3",
 ], default-features = false }
 rattler_repodata_gateway = { version = "0.34.0", default-features = false }
@@ -50,7 +50,7 @@ reqwest-middleware = { version = "0.5.1", package = "astral-reqwest-middleware" 
 reqwest-retry = { version = "0.9.1", package = "astral-reqwest-retry" }
 serde = "1.0.229"
 serde_json = "1.0.151"
-serde_yml = "0.0.12"
+serde_yml = "0.0.13"
 sha2 = "0.11.0"
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
